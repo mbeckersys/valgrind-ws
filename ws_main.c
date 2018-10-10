@@ -39,6 +39,7 @@
 #include "pub_tool_hashtable.h"
 #include "pub_tool_mallocfree.h"
 #include "pub_tool_xtree.h"
+#include "pub_tool_xarray.h"
 
 /*------------------------------------------------------------*/
 /*--- type definitions                                     ---*/
@@ -78,6 +79,14 @@ typedef
    }
    Event;
 
+typedef
+   struct {
+      Time t;
+      unsigned long pages_insn;
+      unsigned long pages_data;
+   }
+   WorkingSet;
+
 /*------------------------------------------------------------*/
 /*--- prototypes                                           ---*/
 /*------------------------------------------------------------*/
@@ -89,10 +98,15 @@ static void maybe_compute_ws (void);
 /*------------------------------------------------------------*/
 
 static Long guest_instrs_executed = 0;
+static unsigned long num_samples = 0;
+static unsigned long drop_samples = 0;
 
 // page access tables
 static VgHashTable *ht_data;
 static VgHashTable *ht_insn;
+
+// working set at each point in time
+static XArray *ws_at_time;
 
 /* Up to this many unnotified events are allowed.  Must be at least two,
    so that reads and writes to the same address can be merged into a modify.
@@ -177,8 +191,8 @@ static void ws_print_usage(void)
 "    --ws-foo=no|yes       enable foo [yes]\n"
 "    --ws-file=<string>    file name to write results\n"
 "    --ws-pagesize=<int>   size of VM pages in bytes [%d]\n"
-"    --ws-time-unit=i|ms   time unit: instructions executed(default), milliseconds\n"
-"    --ws-every=<int>      measure WS every <int> time units [%d]\n"
+"    --ws-time-unit=i|ms   time unit: instructions executed (default), milliseconds\n"
+"    --ws-every=<int>      sample WS every <int> time units [%d]\n"
 "    --ws-tau=<int>        consider all accesses made in the last tau time units [%d]\n",
    WS_DEFAULT_PS,
    WS_DEFAULT_EVERY,
@@ -239,22 +253,19 @@ static inline Addr pageaddr(Addr addr)
 // TODO: pages shared between threads?
 static void pageaccess(Addr pageaddr, VgHashTable *ht) {
 
-   struct pageaddr_order * pa = VG_(HT_lookup) (ht, pageaddr);
-   if (pa == NULL) {
-      pa = VG_(malloc) (sizeof (struct pageaddr_order));
-      pa->top.key = pageaddr;
-      pa->count = 0;
-      VG_(HT_add_node) (ht, (VgHashNode *) pa);
+   struct pageaddr_order * page = VG_(HT_lookup) (ht, pageaddr);
+   if (page == NULL) {
+      page = VG_(malloc) (sizeof (struct pageaddr_order));
+      page->top.key = pageaddr;
+      page->count = 0;
+      VG_(HT_add_node) (ht, (VgHashNode *) page);
       //VG_(dmsg)("New page: %p\n", pageaddr);
    }
 
-   pa->count++;
-
-   // FIXME: use VG's cycle counter for access times
-   unsigned int low;
-   unsigned int high;
-   asm volatile ("rdtsc" : "=a" (low), "=d" (high));
-   pa->last_access = (((unsigned long long int) high) << 32) | low;
+   page->count++;
+   page->last_access = (long) get_time();
+   //const char pt = (ht == ht_data) ? 'D' : 'I';
+   //VG_(dmsg)("%c page acess @%ld\n", pt, page->last_access);
 
    maybe_compute_ws();
 }
@@ -459,6 +470,39 @@ static void add_counter_update(IRSB* sbOut, Int n)
    addStmtToIRSB( sbOut, st3 );
 }
 
+// iterate pages and count those accessed within (now_time - tau, now_time)
+static
+unsigned long recently_used_pages(VgHashTable *ht, Time now_time)
+{
+   unsigned long cnt = 0;
+
+   const Time tmin = now_time - clo_tau;
+
+   VG_(HT_ResetIter)(ht);
+   const VgHashNode *nd;
+   while ((nd = VG_(HT_Next)(ht))) {
+      const struct pageaddr_order *page = (const struct pageaddr_order *) nd;
+      if (page->last_access > tmin) cnt++;
+   }
+   return cnt;
+}
+
+static
+void compute_ws(Time now_time)
+{
+   WorkingSet *ws = VG_(malloc) (sizeof(WorkingSet));
+   if (!ws) {
+      drop_samples++;
+      return;
+   }
+
+   ws->t = now_time;
+   ws->pages_insn = recently_used_pages(ht_insn, now_time);
+   ws->pages_data = recently_used_pages(ht_data, now_time);
+   num_samples++;
+   VG_(addToXA) (ws_at_time, &ws);
+}
+
 static
 void maybe_compute_ws (void)
 {
@@ -469,8 +513,7 @@ void maybe_compute_ws (void)
    Time now_time = get_time();
    if (now_time < earliest_possible_time_of_next_ws) return;
 
-   VG_(umsg)("Calc wset @%ld %s...\n", now_time, TimeUnit_to_string(clo_time_unit));
-   // TODO: calc it and store somewhere
+   compute_ws (now_time);
 
    earliest_possible_time_of_next_ws = now_time + clo_every;
 }
@@ -670,7 +713,7 @@ rescompare (const void *p1, const void *p2)
    return 0;
 }
 
-static void print_table(VgHashTable *ht, VgFile *fp)
+static void print_pagestats(VgHashTable *ht, VgFile *fp)
 {
    struct pageaddr_order **res;
    int nres = 0;
@@ -688,7 +731,7 @@ static void print_table(VgHashTable *ht, VgFile *fp)
    VG_(fprintf) (fp, "   count                 page  last accessed\n");
    for (int i = 0; i < nres; ++i)
    {
-      VG_(fprintf) (fp, "%8lu %018p %12llu\n",
+      VG_(fprintf) (fp, "%8lu %018p %14llu\n",
                     res[i]->count,
                     (void*)res[i]->top.key,
                     res[i]->last_access);
@@ -696,10 +739,46 @@ static void print_table(VgHashTable *ht, VgFile *fp)
    // FIXME: leaks
 }
 
+static void print_ws_over_time(XArray *xa, VgFile *fp, int which)
+{
+   int i;
+
+   // header
+   if (0 == which) { // insn
+      VG_(fprintf) (fp, "%12s %8s\n", "t", "WSS_insn");
+   } else if (1 == which) { // data
+      VG_(fprintf) (fp, "%12s %8s\n", "t", "WSS_data");
+   } else { // both
+      VG_(fprintf) (fp, "%12s %8s %8s\n", "t", "WSS_insn", "WSS_data");
+   }
+
+   // data points
+   for (i = 0; i < VG_(sizeXA)(ws_at_time); i++) {
+      WorkingSet **ws = VG_(indexXA)(ws_at_time, i);
+      if (0 == which) {
+         VG_(fprintf) (fp, "%12lu %8lu\n",
+                       (unsigned long)(*ws)->t, (*ws)->pages_insn);
+      } else if (1 == which) {
+         VG_(fprintf) (fp, "%12lu %8lu\n",
+                       (unsigned long)(*ws)->t, (*ws)->pages_insn);
+      } else {
+         VG_(fprintf) (fp, "%12lu %8lu %8lu\n",
+                       (unsigned long)(*ws)->t, (*ws)->pages_data, (*ws)->pages_insn);
+      }
+   }
+}
+
 static void ws_fini(Int exitcode)
 {
+   // force one last data point
+   compute_ws(get_time());
+
    tl_assert(clo_fnname);
    tl_assert(clo_fnname[0]);
+
+   VG_(umsg)("Number of instructions: %lu\n", (unsigned long) guest_instrs_executed);
+   VG_(umsg)("Number of WS samples: %lu\n", num_samples);
+   VG_(umsg)("Dropped WS samples: %lu\n", drop_samples);
 
    HChar* outfile = VG_(expand_file_name)("--ws-file", clo_filename);
    VG_(umsg)("Writing results to file '%s'\n", outfile);
@@ -719,14 +798,19 @@ static void ws_fini(Int exitcode)
 
    if (fp != NULL) {
       VG_(fprintf) (fp, "Code pages:\n");
-      print_table(ht_insn, fp);
+      print_pagestats (ht_insn, fp);
       VG_(fprintf) (fp, "\nData pages:\n");
-      print_table(ht_data, fp);
+      print_pagestats (ht_data, fp);
+
+      VG_(fprintf) (fp, "\nWorking sets:\n");
+      print_ws_over_time (ws_at_time, fp, 2);
    }
 
    // cleanup
    VG_(fclose)(fp);
-   // FIXME: teardown hash table?
+   VG_(HT_destruct) (ht_data, VG_(free));
+   VG_(HT_destruct) (ht_insn, VG_(free));
+   VG_(deleteXA) (ws_at_time);
    VG_(umsg)("ws finished\n");
 }
 
@@ -750,6 +834,8 @@ static void ws_pre_clo_init(void)
 
    ht_data = VG_(HT_construct) ("ht_data");
    ht_insn = VG_(HT_construct) ("ht_insn");
+   ws_at_time = VG_(newXA) (VG_(malloc), "arr_ws", VG_(free), sizeof(WorkingSet*));
+
 }
 
 VG_DETERMINE_INTERFACE_VERSION(ws_pre_clo_init)

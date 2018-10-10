@@ -7,11 +7,11 @@ and quantifies the amount of memory that a process requires over a time interval
 This program measures at page granularity, separately for code and data.
 
 ## Limitations
-This tool in early development, and not do what you might expect. Please familiarize yourself with the limitations below.
+This tool in early development, and might not do what you may expect. Please familiarize yourself with the limitations below.
 
 ### Precision
- * The sampling interval is not exactly equidistant, but happens only at the and of superblocks or exit IRs
- * Sharing pages between threads is currently ignored, therefore the working set may be too large for multi-threaded programs.
+ * The sampling interval is not exactly equidistant, but happens only at the end of superblocks or exit IR statements.
+ * Sharing pages between threads is currently ignored, therefore the working set may be overestimated for multi-threaded programs.
 
 ## Compiling
 ### Prerequisites
@@ -42,4 +42,51 @@ valgrind --tool=ws --ws-every=50000 <executable>
 The page size is assumed to be 4kB by default, and can be changed with `--ws-pagesize`.
 
 ### Output
-TODO
+The tool dumps the output to a file, one per PID. Filenames can be selected via `--ws-filename`.
+First it prints the page counters:
+```
+Code pages:
+ 269 entries:
+     count                 page  last accessed
+1580768124 0x00000000000040B000     4497357144
+1026520428 0x00000000000040C000     4103152507
+ 840914760 0x000000000000421000     4497357138
+ 551533455 0x000000000000411000     3559503578
+ 104982644 0x000000000000422000     4117425424
+  60066864 0x000000000000410000     3796721408
+
+Data pages:
+1474 entries:
+    count                 page  last accessed
+162444651 0x000000001FFEFFF000     4497362197
+ 20039552 0x000000001FFEFF1000     4497336740
+ 20039552 0x000000001FFEFF2000     4497338276
+ 20039552 0x000000001FFEFF0000     4497335204
+ 20039552 0x000000001FFEFF3000     4497339812
+```
+
+Then it prints the working set size (in number of pages) over time:
+```
+Working sets:
+           t WSS_insn WSS_data
+           0        0        0
+       10003       14       16
+       20012       30       16
+       30013       26       13
+       40015       35       13
+       50018       37       13
+       60018       37       13
+       70020       39       14
+       80021       25       10
+       90033       28       11
+      100035       27        5
+      110039       23       11
+      120041       10        1
+      130041       50        4
+      140042       43        5
+      150042       50        5
+      160055       43        4
+      170061       43        4
+      180063       51        5
+```
+whereas the increments in column `t` are approximately the value of command line parameter `--every`.
