@@ -32,14 +32,16 @@
 #include "pub_tool_libcprint.h"
 #include "pub_tool_debuginfo.h"
 #include "pub_tool_libcbase.h"
+#include "pub_tool_libcfile.h"
+#include "pub_tool_libcproc.h"
 #include "pub_tool_options.h"
 #include "pub_tool_machine.h"     // VG_(fnptr_to_fnentry)
 #include "pub_tool_hashtable.h"
 #include "pub_tool_mallocfree.h"
-#include "pub_tool_libcfile.h"
+#include "pub_tool_xtree.h"
 
 /*------------------------------------------------------------*/
-/*--- page access tables                                   ---*/
+/*--- type definitions                                     ---*/
 /*------------------------------------------------------------*/
 
 struct pageaddr_order
@@ -49,56 +51,9 @@ struct pageaddr_order
   unsigned long long int last_access;
 };
 
-static VgHashTable *ht_data;
-static VgHashTable *ht_insn;
-
 #define vgPlain_malloc(size) vgPlain_malloc ((const char *) __func__, size)
 
-/*------------------------------------------------------------*/
-/*--- Command line options                                 ---*/
-/*------------------------------------------------------------*/
-
-/* Command line options controlling instrumentation kinds, as described at
- * the top of this file. */
-static Bool clo_trace_mem       = True;
-static Int  clo_pagesize        = 4096;
-
-/* The name of the function of which the number of calls (under
- * --basic-counts=yes) is to be counted, with default. Override with command
- * line option --fnname. */
-static const HChar* clo_fnname = "main";
-static const HChar* clo_filename = "ws.out.%p";
-
-static Bool ws_process_cmd_line_option(const HChar* arg)
-{
-
-   if VG_BOOL_CLO(arg, "--trace-mem",    clo_trace_mem) {}
-   else if VG_INT_CLO(arg, "--pagesize", clo_pagesize) {}
-   else if VG_STR_CLO(arg, "--ws-file",  clo_filename) {}
-   else
-      return False;
-
-   tl_assert(clo_fnname);
-   tl_assert(clo_fnname[0]);
-   tl_assert(clo_pagesize > 0);
-   return True;
-}
-
-static void ws_print_usage(void)
-{
-   VG_(printf)(
-"    --trace-mem=no|yes        trace all loads and stores [yes]\n"
-"    --pagesize=<int>          size of VM pages in bytes [4096]\n"
-"    --ws-file=<string>        file name to write results\n"
-   );
-}
-
-static void ws_print_debug_usage(void)
-{
-   VG_(printf)(
-"    (none)\n"
-   );
-}
+typedef enum { TimeI, TimeMS } TimeUnit;
 
 typedef
    IRExpr
@@ -107,11 +62,6 @@ typedef
 /* --- Operations --- */
 
 typedef enum { OpLoad=0, OpStore=1, OpAlu=2 } Op;
-
-
-/*------------------------------------------------------------*/
-/*--- Stuff for --trace-mem                                ---*/
-/*------------------------------------------------------------*/
 
 #define MAX_DSIZE    512
 
@@ -127,6 +77,22 @@ typedef
       IRAtom*    guard; /* :: Ity_I1, or NULL=="always True" */
    }
    Event;
+
+/*------------------------------------------------------------*/
+/*--- prototypes                                           ---*/
+/*------------------------------------------------------------*/
+
+static void maybe_compute_ws (void);
+
+/*------------------------------------------------------------*/
+/*--- globals                                              ---*/
+/*------------------------------------------------------------*/
+
+static Long guest_instrs_executed = 0;
+
+// page access tables
+static VgHashTable *ht_data;
+static VgHashTable *ht_insn;
 
 /* Up to this many unnotified events are allowed.  Must be at least two,
    so that reads and writes to the same address can be merged into a modify.
@@ -164,29 +130,133 @@ typedef
 static Event events[N_EVENTS];
 static Int   events_used = 0;
 
-static inline Addr pageaddr(Addr addr)
+/*------------------------------------------------------------*/
+/*--- Command line options                                 ---*/
+/*------------------------------------------------------------*/
+
+/* Command line options controlling instrumentation kinds, as described at
+ * the top of this file. */
+
+#define WS_DEFAULT_PS 4096
+#define WS_DEFAULT_EVERY 100000
+#define WS_DEFAULT_TAU WS_DEFAULT_EVERY
+
+static Bool clo_foo       = True;
+static Int  clo_pagesize  = WS_DEFAULT_PS;
+static Int  clo_every     = WS_DEFAULT_EVERY;
+static Int  clo_tau       = 0;
+static Int  clo_time_unit = TimeI;
+
+/* The name of the function of which the number of calls (under
+ * --basic-counts=yes) is to be counted, with default. Override with command
+ * line option --fnname. */
+static const HChar* clo_fnname = "main";
+static const HChar* clo_filename = "ws.out.%p";
+
+static Bool ws_process_cmd_line_option(const HChar* arg)
 {
-    return addr & ~(clo_pagesize-1);
+   if VG_BOOL_CLO(arg, "--ws-foo", clo_foo) {}
+   else if VG_STR_CLO(arg, "--ws-file", clo_filename) {}
+   else if VG_INT_CLO(arg, "--ws-pagesize", clo_pagesize) {}
+   else if VG_INT_CLO(arg, "--ws-every", clo_every) {}
+   else if VG_INT_CLO(arg, "--ws-tau", clo_tau) { tl_assert(clo_tau > 0); }
+   else if VG_XACT_CLO(arg, "--ws-time-unit=i", clo_time_unit, TimeI)  {}
+   else if VG_XACT_CLO(arg, "--ws-time-unit=ms", clo_time_unit, TimeMS) {}
+   else return False;
+
+   tl_assert(clo_fnname);
+   tl_assert(clo_fnname[0]);
+   tl_assert(clo_pagesize > 0);
+   tl_assert(clo_every > 0);
+   return True;
 }
 
+static void ws_print_usage(void)
+{
+   VG_(printf)(
+"    --ws-foo=no|yes       enable foo [yes]\n"
+"    --ws-file=<string>    file name to write results\n"
+"    --ws-pagesize=<int>   size of VM pages in bytes [%d]\n"
+"    --ws-time-unit=i|ms   time unit: instructions executed(default), milliseconds\n"
+"    --ws-every=<int>      measure WS every <int> time units [%d]\n"
+"    --ws-tau=<int>        consider all accesses made in the last tau time units [%d]\n",
+   WS_DEFAULT_PS,
+   WS_DEFAULT_EVERY,
+   WS_DEFAULT_TAU
+   );
+}
+
+static void ws_print_debug_usage(void)
+{
+   VG_(printf)(
+"    (none)\n"
+   );
+}
+
+static const HChar* TimeUnit_to_string(TimeUnit time_unit)
+{
+   switch (time_unit) {
+   case TimeI:  return "instructions";
+   case TimeMS: return "ms";
+   default:     tl_assert2(0, "TimeUnit_to_string: unrecognised TimeUnit");
+   }
+}
+
+static Time get_time(void)
+{
+   // Get current time, in whatever time unit we're using.
+   if (clo_time_unit == TimeI) {
+      return guest_instrs_executed;
+   } else if (clo_time_unit == TimeMS) {
+      // Some stuff happens between the millisecond timer being initialised
+      // to zero and us taking our first snapshot.  We determine that time
+      // gap so we can subtract it from all subsequent times so that our
+      // first snapshot is considered to be at t = 0ms.  Unfortunately, a
+      // bunch of symbols get read after the first snapshot is taken but
+      // before the second one (which is triggered by the first allocation),
+      // so when the time-unit is 'ms' we always have a big gap between the
+      // first two snapshots.  But at least users won't have to wonder why
+      // the first snapshot isn't at t=0.
+      static Bool is_first_get_time = True;
+      static Time start_time_ms;
+      if (is_first_get_time) {
+         start_time_ms = VG_(read_millisecond_timer)();
+         is_first_get_time = False;
+         return 0;
+      } else {
+         return VG_(read_millisecond_timer)() - start_time_ms;
+      }
+   } else {
+      tl_assert2(0, "bad --time-unit value");
+   }
+}
+
+static inline Addr pageaddr(Addr addr)
+{
+   return addr & ~(clo_pagesize-1);
+}
+
+// TODO: pages shared between threads?
 static void pageaccess(Addr pageaddr, VgHashTable *ht) {
 
-    struct pageaddr_order * pa = VG_(HT_lookup) (ht, pageaddr);
-    if (pa == NULL) {
+   struct pageaddr_order * pa = VG_(HT_lookup) (ht, pageaddr);
+   if (pa == NULL) {
       pa = VG_(malloc) (sizeof (struct pageaddr_order));
       pa->top.key = pageaddr;
       pa->count = 0;
       VG_(HT_add_node) (ht, (VgHashNode *) pa);
       //VG_(dmsg)("New page: %p\n", pageaddr);
-    }
+   }
 
-    pa->count++;
+   pa->count++;
 
-    // FIXME: use VG's cycle counter for access times
-    unsigned int low;
-    unsigned int high;
-    asm volatile ("rdtsc" : "=a" (low), "=d" (high));
-    pa->last_access = (((unsigned long long int) high) << 32) | low;
+   // FIXME: use VG's cycle counter for access times
+   unsigned int low;
+   unsigned int high;
+   asm volatile ("rdtsc" : "=a" (low), "=d" (high));
+   pa->last_access = (((unsigned long long int) high) << 32) | low;
+
+   maybe_compute_ws();
 }
 
 static VG_REGPARM(2) void trace_data(Addr addr, SizeT size)
@@ -230,7 +300,7 @@ static void flushEvents(IRSB* sb)
       }
 
       // Add the helper.
-      argv = mkIRExprVec_2( ev->addr, mkIRExpr_HWord( ev->size ));  // FIXME: need also cycle number
+      argv = mkIRExprVec_2( ev->addr, mkIRExpr_HWord( ev->size ));
       di   = unsafeIRDirty_0_N( /*regparms*/2,
                                 helperName, VG_(fnptr_to_fnentry)( helperAddr ),
                                 argv );
@@ -246,7 +316,6 @@ static void flushEvents(IRSB* sb)
 static void addEvent_Ir ( IRSB* sb, IRAtom* iaddr, UInt isize )
 {
    Event* evt;
-   tl_assert(clo_trace_mem);
    tl_assert( (VG_MIN_INSTR_SZB <= isize && isize <= VG_MAX_INSTR_SZB)
             || VG_CLREQ_SZB == isize );
    if (events_used == N_EVENTS)
@@ -265,7 +334,6 @@ static
 void addEvent_Dr_guarded ( IRSB* sb, IRAtom* daddr, Int dsize, IRAtom* guard )
 {
    Event* evt;
-   tl_assert(clo_trace_mem);
    tl_assert(isIRAtom(daddr));
    tl_assert(dsize >= 1 && dsize <= MAX_DSIZE);
    if (events_used == N_EVENTS)
@@ -292,7 +360,6 @@ static
 void addEvent_Dw_guarded ( IRSB* sb, IRAtom* daddr, Int dsize, IRAtom* guard )
 {
    Event* evt;
-   tl_assert(clo_trace_mem);
    tl_assert(isIRAtom(daddr));
    tl_assert(dsize >= 1 && dsize <= MAX_DSIZE);
    if (events_used == N_EVENTS)
@@ -314,7 +381,6 @@ void addEvent_Dw ( IRSB* sb, IRAtom* daddr, Int dsize )
 {
    Event* lastEvt;
    Event* evt;
-   tl_assert(clo_trace_mem);
    tl_assert(isIRAtom(daddr));
    tl_assert(dsize >= 1 && dsize <= MAX_DSIZE);
 
@@ -349,10 +415,70 @@ void addEvent_Dw ( IRSB* sb, IRAtom* daddr, Int dsize )
 
 static void ws_post_clo_init(void)
 {
+   if (clo_tau == 0) clo_tau = clo_every;
 
+   if (clo_time_unit != TimeI) {
+      VG_(umsg)("Warning: time unit %s not implemented, yet. Fallback to instructions",
+                TimeUnit_to_string(clo_time_unit));
+      clo_time_unit = TimeI;
+   }
+
+   VG_(umsg)("Page size = %d bytes\n", clo_pagesize);
+   VG_(umsg)("Computing WS every %d %s\n", clo_every,
+             TimeUnit_to_string(clo_time_unit));
+   VG_(umsg)("Considering references in past %d %s\n", clo_tau,
+             TimeUnit_to_string(clo_time_unit));
 }
 
-// TODO: interesting part
+static void add_counter_update(IRSB* sbOut, Int n)
+{
+   #if defined(VG_BIGENDIAN)
+   # define END Iend_BE
+   #elif defined(VG_LITTLEENDIAN)
+   # define END Iend_LE
+   #else
+   # error "Unknown endianness"
+   #endif
+   // Add code to increment 'guest_instrs_executed' by 'n', like this:
+   //   WrTmp(t1, Load64(&guest_instrs_executed))
+   //   WrTmp(t2, Add64(RdTmp(t1), Const(n)))
+   //   Store(&guest_instrs_executed, t2)
+   IRTemp t1 = newIRTemp(sbOut->tyenv, Ity_I64);
+   IRTemp t2 = newIRTemp(sbOut->tyenv, Ity_I64);
+   IRExpr* counter_addr = mkIRExpr_HWord( (HWord)&guest_instrs_executed );
+
+   IRStmt* st1 = IRStmt_WrTmp(t1, IRExpr_Load(END, Ity_I64, counter_addr));
+   IRStmt* st2 =
+      IRStmt_WrTmp(t2,
+                   IRExpr_Binop(Iop_Add64, IRExpr_RdTmp(t1),
+                                           IRExpr_Const(IRConst_U64(n))));
+   IRStmt* st3 = IRStmt_Store(END, counter_addr, IRExpr_RdTmp(t2));
+
+   addStmtToIRSB( sbOut, st1 );
+   addStmtToIRSB( sbOut, st2 );
+   addStmtToIRSB( sbOut, st3 );
+}
+
+static
+void maybe_compute_ws (void)
+{
+   tl_assert(clo_time_unit == TimeI);
+
+   // if 'every' time units have passed, determine working set again
+   static Time earliest_possible_time_of_next_ws = 0;
+   Time now_time = get_time();
+   if (now_time < earliest_possible_time_of_next_ws) return;
+
+   VG_(umsg)("Calc wset @%ld %s...\n", now_time, TimeUnit_to_string(clo_time_unit));
+   // TODO: calc it and store somewhere
+
+   earliest_possible_time_of_next_ws = now_time + clo_every;
+}
+
+// We increment the instruction count in two places:
+// - just before any Ist_Exit statements;
+// - just before the IRSB's end.
+// In the former case, we zero 'n' and then continue instrumenting.
 static
 IRSB* ws_instrument ( VgCallbackClosure* closure,
                       IRSB* sbIn,
@@ -361,7 +487,7 @@ IRSB* ws_instrument ( VgCallbackClosure* closure,
                       const VexArchInfo* archinfo_host,
                       IRType gWordTy, IRType hWordTy )
 {
-   Int        i;
+   Int        i, ninsn;
    IRSB*      sbOut;
    IRTypeEnv* tyenv = sbIn->tyenv;
 
@@ -370,7 +496,6 @@ IRSB* ws_instrument ( VgCallbackClosure* closure,
       VG_(tool_panic)("host/guest word size mismatch");
    }
 
-   /* Set up SB */
    sbOut = deepCopyIRSBExceptStmts(sbIn);
 
    // Copy verbatim any IR preamble preceding the first IMark
@@ -380,10 +505,8 @@ IRSB* ws_instrument ( VgCallbackClosure* closure,
       i++;
    }
 
-   if (clo_trace_mem) {
-      events_used = 0;
-   }
-
+   events_used = ninsn = 0;
+   // instrument accesses and insn counter, if needed
    for (/*use current i*/; i < sbIn->stmts_used; i++) {
       IRStmt* st = sbIn->stmts[i];
       if (!st || st->tag == Ist_NoOp) continue;
@@ -398,20 +521,18 @@ IRSB* ws_instrument ( VgCallbackClosure* closure,
             break;
 
          case Ist_IMark:
-            if (clo_trace_mem) {
-               addEvent_Ir( sbOut, mkIRExpr_HWord( (HWord)st->Ist.IMark.addr ),
-                            st->Ist.IMark.len );
-            }
+            if (clo_time_unit == TimeI) ninsn++;
+            addEvent_Ir( sbOut, mkIRExpr_HWord( (HWord)st->Ist.IMark.addr ),
+                         st->Ist.IMark.len );
             addStmtToIRSB( sbOut, st );
             break;
 
          case Ist_WrTmp:
-            // Add a call to trace_load() if --trace-mem=yes.
-            if (clo_trace_mem) {
+            {
                IRExpr* data = st->Ist.WrTmp.data;
                if (data->tag == Iex_Load) {
-                  addEvent_Dr( sbOut, data->Iex.Load.addr,
-                               sizeofIRType(data->Iex.Load.ty) );
+                   addEvent_Dr( sbOut, data->Iex.Load.addr,
+                                sizeofIRType(data->Iex.Load.ty) );
                }
             }
             addStmtToIRSB( sbOut, st );
@@ -421,10 +542,8 @@ IRSB* ws_instrument ( VgCallbackClosure* closure,
             IRExpr* data = st->Ist.Store.data;
             IRType  type = typeOfIRExpr(tyenv, data);
             tl_assert(type != Ity_INVALID);
-            if (clo_trace_mem) {
-               addEvent_Dw( sbOut, st->Ist.Store.addr,
-                            sizeofIRType(type) );
-            }
+            addEvent_Dw( sbOut, st->Ist.Store.addr,
+                         sizeofIRType(type) );
             addStmtToIRSB( sbOut, st );
             break;
          }
@@ -434,10 +553,8 @@ IRSB* ws_instrument ( VgCallbackClosure* closure,
             IRExpr*   data = sg->data;
             IRType    type = typeOfIRExpr(tyenv, data);
             tl_assert(type != Ity_INVALID);
-            if (clo_trace_mem) {
-               addEvent_Dw_guarded( sbOut, sg->addr,
-                                    sizeofIRType(type), sg->guard );
-            }
+            addEvent_Dw_guarded( sbOut, sg->addr,
+                                 sizeofIRType(type), sg->guard );
             addStmtToIRSB( sbOut, st );
             break;
          }
@@ -448,16 +565,14 @@ IRSB* ws_instrument ( VgCallbackClosure* closure,
             IRType   typeWide = Ity_INVALID; /* after implicit widening */
             typeOfIRLoadGOp(lg->cvt, &typeWide, &type);
             tl_assert(type != Ity_INVALID);
-            if (clo_trace_mem) {
-               addEvent_Dr_guarded( sbOut, lg->addr,
-                                    sizeofIRType(type), lg->guard );
-            }
+            addEvent_Dr_guarded( sbOut, lg->addr,
+                                 sizeofIRType(type), lg->guard );
             addStmtToIRSB( sbOut, st );
             break;
          }
 
          case Ist_Dirty: {
-            if (clo_trace_mem) {
+            {
                Int      dsize;
                IRDirty* d = st->Ist.Dirty.details;
                if (d->mFx != Ifx_None) {
@@ -493,10 +608,8 @@ IRSB* ws_instrument ( VgCallbackClosure* closure,
             dataSize = sizeofIRType(dataTy);
             if (cas->dataHi != NULL)
                dataSize *= 2; /* since it's a doubleword-CAS */
-            if (clo_trace_mem) {
-               addEvent_Dr( sbOut, cas->addr, dataSize );
-               addEvent_Dw( sbOut, cas->addr, dataSize );
-            }
+            addEvent_Dr( sbOut, cas->addr, dataSize );
+            addEvent_Dw( sbOut, cas->addr, dataSize );
 
             addStmtToIRSB( sbOut, st );
             break;
@@ -507,27 +620,27 @@ IRSB* ws_instrument ( VgCallbackClosure* closure,
             if (st->Ist.LLSC.storedata == NULL) {
                /* LL */
                dataTy = typeOfIRTemp(tyenv, st->Ist.LLSC.result);
-               if (clo_trace_mem) {
-                  addEvent_Dr( sbOut, st->Ist.LLSC.addr,
-                                      sizeofIRType(dataTy) );
-                  /* flush events before LL, helps SC to succeed */
-                  flushEvents(sbOut);
-               }
+               addEvent_Dr( sbOut, st->Ist.LLSC.addr,
+                                   sizeofIRType(dataTy) );
+               /* flush events before LL, helps SC to succeed */
+               flushEvents(sbOut);
             } else {
                /* SC */
                dataTy = typeOfIRExpr(tyenv, st->Ist.LLSC.storedata);
-               if (clo_trace_mem)
-                  addEvent_Dw( sbOut, st->Ist.LLSC.addr,
-                                      sizeofIRType(dataTy) );
+               addEvent_Dw( sbOut, st->Ist.LLSC.addr,
+                            sizeofIRType(dataTy) );
             }
             addStmtToIRSB( sbOut, st );
             break;
          }
 
          case Ist_Exit:
-            if (clo_trace_mem) {
-               flushEvents(sbOut);
+            if (clo_time_unit == TimeI && ninsn > 0) {
+               // Add an increment before the Exit statement, then reset 'n'.
+               add_counter_update(sbOut, ninsn);
+               ninsn = 0;
             }
+            flushEvents(sbOut);
             addStmtToIRSB( sbOut, st );      // Original statement
             break;
 
@@ -537,10 +650,11 @@ IRSB* ws_instrument ( VgCallbackClosure* closure,
       }
    }
 
-   if (clo_trace_mem) {
-      /* At the end of the sbIn.  Flush outstandings. */
-      flushEvents(sbOut);
+   /* At the end of the sbIn.  Flush outstandings. */
+   if (clo_time_unit == TimeI && ninsn > 0) {
+      add_counter_update(sbOut, ninsn);
    }
+   flushEvents(sbOut);
 
    return sbOut;
 }
@@ -548,43 +662,38 @@ IRSB* ws_instrument ( VgCallbackClosure* closure,
 static Int
 rescompare (const void *p1, const void *p2)
 {
-  const struct pageaddr_order * const *a1 = (const struct pageaddr_order * const *) p1;
-  const struct pageaddr_order * const *a2 = (const struct pageaddr_order * const *) p2;
+   const struct pageaddr_order * const *a1 = (const struct pageaddr_order * const *) p1;
+   const struct pageaddr_order * const *a2 = (const struct pageaddr_order * const *) p2;
 
-  if ((*a1)->count > (*a2)->count)
-    return -1;
-  if ((*a1)->count < (*a2)->count)
-    return 1;
-  return 0;
+   if ((*a1)->count > (*a2)->count) return -1;
+   if ((*a1)->count < (*a2)->count) return 1;
+   return 0;
 }
 
 static void print_table(VgHashTable *ht, VgFile *fp)
 {
-  struct pageaddr_order **res;
-  int nres = 0;
+   struct pageaddr_order **res;
+   int nres = 0;
 
-  int nentry = VG_(HT_count_nodes) (ht);
-  VG_(fprintf) (fp, "%4d entries:\n", nentry);
+   int nentry = VG_(HT_count_nodes) (ht);
+   VG_(fprintf) (fp, "%4d entries:\n", nentry);
 
-  VG_(umsg)("Sorting results...\n");
-  res = VG_(malloc) (nentry * sizeof (*res));  // ptr to ptr
-  VG_(HT_ResetIter)(ht);
-  VgHashNode *nd;
-  while ((nd = VG_(HT_Next)(ht)))
-       res[nres++] = (struct pageaddr_order *) nd;
-  VG_(ssort) (res, nres, sizeof (res[0]), rescompare);
+   res = VG_(malloc) (nentry * sizeof (*res));  // ptr to ptr
+   VG_(HT_ResetIter)(ht);
+   VgHashNode *nd;
+   while ((nd = VG_(HT_Next)(ht)))
+      res[nres++] = (struct pageaddr_order *) nd;
+   VG_(ssort) (res, nres, sizeof (res[0]), rescompare);
 
-  VG_(umsg)("Writing results...\n");
-
-  VG_(fprintf) (fp, "   count                 page  last accessed\n");
-  for (int i = 0; i < nres; ++i)
-  {
-    VG_(fprintf) (fp, "%8d %018p %12llu\n",
-                  res[i]->count,
-                  (void*)res[i]->top.key,
-                  res[i]->last_access);
-  }
-  // FIXME: leaks
+   VG_(fprintf) (fp, "   count                 page  last accessed\n");
+   for (int i = 0; i < nres; ++i)
+   {
+      VG_(fprintf) (fp, "%8lu %018p %12llu\n",
+                    res[i]->count,
+                    (void*)res[i]->top.key,
+                    res[i]->last_access);
+   }
+   // FIXME: leaks
 }
 
 static void ws_fini(Int exitcode)
@@ -609,16 +718,16 @@ static void ws_fini(Int exitcode)
    }
 
    if (fp != NULL) {
-       VG_(fprintf) (fp, "Code pages:\n");
-       print_table(ht_insn, fp);
-
-       VG_(fprintf) (fp, "\nData pages:\n");
-       print_table(ht_data, fp);
+      VG_(fprintf) (fp, "Code pages:\n");
+      print_table(ht_insn, fp);
+      VG_(fprintf) (fp, "\nData pages:\n");
+      print_table(ht_data, fp);
    }
 
    // cleanup
    VG_(fclose)(fp);
    // FIXME: teardown hash table?
+   VG_(umsg)("ws finished\n");
 }
 
 // DONE
