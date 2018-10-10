@@ -42,30 +42,41 @@ valgrind --tool=ws --ws-every=50000 <executable>
 The page size is assumed to be 4kB by default, and can be changed with `--ws-pagesize`.
 
 ### Output
-The tool dumps the output to a file, one per PID. Filenames can be selected via `--ws-filename`.
-First it prints the page counters:
+The tool dumps the output to a file, one per PID. The file name can be chosen using `--ws-file`.
+First it prints the page access counters:
 ```
+Working Set Measurement by valgrind-ws-0.1
+
+Command: stress-ng --memrate 1 -t 2
+Instructions: 1044362
+Page size: 4096 B
+Time Unit: instructions
+Every: 10000 units
+Tau: 1000000 units
+
 Code pages:
- 269 entries:
-     count                 page  last accessed
-1580768124 0x00000000000040B000     4497357144
-1026520428 0x00000000000040C000     4103152507
- 840914760 0x000000000000421000     4497357138
- 551533455 0x000000000000411000     3559503578
- 104982644 0x000000000000422000     4117425424
-  60066864 0x000000000000410000     3796721408
+ 180 entries:
+   count                 page  last accessed location
+  247131 0x000000000005A25000        1037277 0x5A25DC0: strcasecmp (strcmp.S:114)
+  122343 0x000000000004008000        1044254 0x4008100: _dl_map_object (dl-load.c:2317)
+   76825 0x000000000004009000        1044316 0x4009810: _dl_lookup_symbol_x (dl-lookup.c:714)
+   74795 0x000000000004017000        1044245 0x4017B50: strlen (rtld-strlen.S:26)
+   56045 0x000000000005ABD000         386040 0x5ABD640: _dl_addr (dl-addr.c:126)
 
 Data pages:
-1474 entries:
-    count                 page  last accessed
-162444651 0x000000001FFEFFF000     4497362197
- 20039552 0x000000001FFEFF1000     4497336740
- 20039552 0x000000001FFEFF2000     4497338276
- 20039552 0x000000001FFEFF0000     4497335204
- 20039552 0x000000001FFEFF3000     4497339812
+ 722 entries:
+   count                 page  last accessed
+   62284 0x000000001FFEFFE000        1037716
+   61885 0x000000001FFEFFF000        1044344
+   15906 0x000000000004223000        1042794
+   12566 0x000000000004050000        1044329
+   11725 0x00000000000404F000        1043695
+    9604 0x000000001FFEFFD000        1037649
 ```
+Note that the location info for code pages is only approximate; it is the debug info belonging to
+the first instruction accessing the given page.
 
-Then it prints the working set size (in number of pages) over time:
+Then it prints the working set size (number of pages) over time:
 ```
 Working sets:
            t WSS_insn WSS_data

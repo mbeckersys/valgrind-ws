@@ -25,21 +25,31 @@
 
    The GNU General Public License is contained in the file COPYING.
 */
+#include <sys/types.h>
 
 #include "pub_tool_basics.h"
 #include "pub_tool_tooliface.h"
 #include "pub_tool_libcassert.h"
 #include "pub_tool_libcprint.h"
-#include "pub_tool_debuginfo.h"
 #include "pub_tool_libcbase.h"
 #include "pub_tool_libcfile.h"
 #include "pub_tool_libcproc.h"
 #include "pub_tool_options.h"
 #include "pub_tool_machine.h"     // VG_(fnptr_to_fnentry)
+#include "pub_tool_clientstate.h"  // args + exe name
 #include "pub_tool_hashtable.h"
 #include "pub_tool_mallocfree.h"
+#include "pub_tool_debuginfo.h"
 #include "pub_tool_xtree.h"
 #include "pub_tool_xarray.h"
+
+/*------------------------------------------------------------*/
+/*--- tool info                                            ---*/
+/*------------------------------------------------------------*/
+
+#define WS_NAME "ws"
+#define WS_VERSION "0.1"
+#define WS_DESC "compute working set for data and instructions"
 
 /*------------------------------------------------------------*/
 /*--- type definitions                                     ---*/
@@ -47,9 +57,10 @@
 
 struct pageaddr_order
 {
-  VgHashNode top;
+  VgHashNode        top;  // page address
   unsigned long int count;
-  unsigned long long int last_access;
+  Time              last_access;
+  HChar             where[0];  // file location for code pages
 };
 
 #define vgPlain_malloc(size) vgPlain_malloc ((const char *) __func__, size)
@@ -251,13 +262,17 @@ static inline Addr pageaddr(Addr addr)
 }
 
 // TODO: pages shared between threads?
-static void pageaccess(Addr pageaddr, VgHashTable *ht) {
+static void pageaccess(Addr pageaddr, VgHashTable *ht, const HChar *where) {
 
    struct pageaddr_order * page = VG_(HT_lookup) (ht, pageaddr);
    if (page == NULL) {
-      page = VG_(malloc) (sizeof (struct pageaddr_order));
+      size_t len = (where != NULL) ? VG_(strlen) (where) + 1 : 0;
+      page = VG_(malloc) (sizeof (*page) + len);
       page->top.key = pageaddr;
       page->count = 0;
+      if (len > 0) {
+         VG_(strcpy) (page->where, where);
+      }
       VG_(HT_add_node) (ht, (VgHashNode *) page);
       //VG_(dmsg)("New page: %p\n", pageaddr);
    }
@@ -273,14 +288,15 @@ static void pageaccess(Addr pageaddr, VgHashTable *ht) {
 static VG_REGPARM(2) void trace_data(Addr addr, SizeT size)
 {
    const Addr pa = pageaddr(addr);
-   pageaccess(pa, ht_data);
+   pageaccess(pa, ht_data, NULL);
    //VG_(dmsg)(" D %08lx,%lu -> page %lu\n", addr, size, pa);
 }
 
 static VG_REGPARM(2) void trace_instr(Addr addr, SizeT size)
 {
    const Addr pa = pageaddr(addr);
-   pageaccess(pa, ht_insn);
+   const HChar *where = VG_(describe_IP) (addr, NULL);
+   pageaccess(pa, ht_insn, where);
    //VG_(dmsg)("I  %08lx,%lu -> page %lu\n", addr, size, pa);
 }
 
@@ -476,7 +492,8 @@ unsigned long recently_used_pages(VgHashTable *ht, Time now_time)
 {
    unsigned long cnt = 0;
 
-   const Time tmin = now_time - clo_tau;
+   Time tmin = 0;
+   if (clo_tau < now_time) tmin = now_time - clo_tau;
 
    VG_(HT_ResetIter)(ht);
    const VgHashNode *nd;
@@ -497,8 +514,8 @@ void compute_ws(Time now_time)
    }
 
    ws->t = now_time;
-   ws->pages_insn = recently_used_pages(ht_insn, now_time);
-   ws->pages_data = recently_used_pages(ht_data, now_time);
+   ws->pages_insn = recently_used_pages (ht_insn, now_time);
+   ws->pages_data = recently_used_pages (ht_data, now_time);
    num_samples++;
    VG_(addToXA) (ws_at_time, &ws);
 }
@@ -728,15 +745,18 @@ static void print_pagestats(VgHashTable *ht, VgFile *fp)
       res[nres++] = (struct pageaddr_order *) nd;
    VG_(ssort) (res, nres, sizeof (res[0]), rescompare);
 
-   VG_(fprintf) (fp, "   count                 page  last accessed\n");
+   VG_(fprintf) (fp, "%8s %20s %14s", "count", "page", "last accessed");
+   if (ht == ht_insn) VG_(fprintf) (fp, " location");
    for (int i = 0; i < nres; ++i)
    {
-      VG_(fprintf) (fp, "%8lu %018p %14llu\n",
+      VG_(fprintf) (fp, "\n%8lu %018p %14llu",
                     res[i]->count,
                     (void*)res[i]->top.key,
                     res[i]->last_access);
+      if (ht == ht_insn) VG_(fprintf) (fp, " %s", res[i]->where);
    }
-   // FIXME: leaks
+   VG_(fprintf) (fp, "\n");
+   // FIXME: leaks (res**)
 }
 
 static void print_ws_over_time(XArray *xa, VgFile *fp, int which)
@@ -744,11 +764,11 @@ static void print_ws_over_time(XArray *xa, VgFile *fp, int which)
    int i;
 
    // header
-   if (0 == which) { // insn
+   if (0 == which) {
       VG_(fprintf) (fp, "%12s %8s\n", "t", "WSS_insn");
-   } else if (1 == which) { // data
+   } else if (1 == which) {
       VG_(fprintf) (fp, "%12s %8s\n", "t", "WSS_data");
-   } else { // both
+   } else {
       VG_(fprintf) (fp, "%12s %8s %8s\n", "t", "WSS_insn", "WSS_data");
    }
 
@@ -757,13 +777,17 @@ static void print_ws_over_time(XArray *xa, VgFile *fp, int which)
       WorkingSet **ws = VG_(indexXA)(ws_at_time, i);
       if (0 == which) {
          VG_(fprintf) (fp, "%12lu %8lu\n",
-                       (unsigned long)(*ws)->t, (*ws)->pages_insn);
+                       (unsigned long)(*ws)->t,
+                       (*ws)->pages_insn);
       } else if (1 == which) {
          VG_(fprintf) (fp, "%12lu %8lu\n",
-                       (unsigned long)(*ws)->t, (*ws)->pages_insn);
+                       (unsigned long)(*ws)->t,
+                       (*ws)->pages_insn);
       } else {
          VG_(fprintf) (fp, "%12lu %8lu %8lu\n",
-                       (unsigned long)(*ws)->t, (*ws)->pages_data, (*ws)->pages_insn);
+                       (unsigned long)(*ws)->t,
+                       (*ws)->pages_data,
+                       (*ws)->pages_insn);
       }
    }
 }
@@ -797,6 +821,17 @@ static void ws_fini(Int exitcode)
    }
 
    if (fp != NULL) {
+      VG_(fprintf) (fp, "Working Set Measurement by valgrind-%s-%s\n\n", WS_NAME, WS_VERSION);
+      VG_(fprintf) (fp, "Command: %s", VG_(args_the_exename));
+      for (int i = 0; i < VG_(sizeXA)( VG_(args_for_client) ); i++) {
+         HChar* arg = * (HChar**) VG_(indexXA)( VG_(args_for_client), i );
+         VG_(fprintf)(fp, " %s", arg);
+      }
+      VG_(fprintf) (fp, "\nInstructions: %lu\n", (unsigned long) guest_instrs_executed);
+      VG_(fprintf) (fp, "Page size: %d B\n", clo_pagesize);
+      VG_(fprintf) (fp, "Time Unit: %s\n", TimeUnit_to_string(clo_time_unit));
+      VG_(fprintf) (fp, "Every: %d units\n", clo_every);
+      VG_(fprintf) (fp, "Tau: %d units\n\n", clo_tau);
       VG_(fprintf) (fp, "Code pages:\n");
       print_pagestats (ht_insn, fp);
       VG_(fprintf) (fp, "\nData pages:\n");
@@ -808,8 +843,8 @@ static void ws_fini(Int exitcode)
 
    // cleanup
    VG_(fclose)(fp);
-   VG_(HT_destruct) (ht_data, VG_(free));
-   VG_(HT_destruct) (ht_insn, VG_(free));
+   VG_(HT_destruct) (ht_data, VG_(free));  // FIXME: incomplete free
+   VG_(HT_destruct) (ht_insn, VG_(free));  // FIXME: incomplete free
    VG_(deleteXA) (ws_at_time);
    VG_(umsg)("ws finished\n");
 }
@@ -817,9 +852,9 @@ static void ws_fini(Int exitcode)
 // DONE
 static void ws_pre_clo_init(void)
 {
-   VG_(details_name)            ("ws");
-   VG_(details_version)         ("0.1");
-   VG_(details_description)     ("compute working set for data and instructions");
+   VG_(details_name)            (WS_NAME);
+   VG_(details_version)         (WS_VERSION);
+   VG_(details_description)     (WS_DESC);
    VG_(details_copyright_author)(
       "Copyright (C) 2018, and GNU GPL'd, by Martin Becker.");
    VG_(details_bug_reports_to)  (VG_BUGS_TO);
