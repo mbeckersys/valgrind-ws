@@ -1,5 +1,5 @@
 # Valgrind-ws
-This plugin for valgrind computes the [working set](https://github.com/mbeckersys/valgrind-ws.git) of an application.
+This plugin for valgrind computes the [working set](https://en.wikipedia.org/wiki/Working_set) of an application.
 That is, it captures the set of references that have been made in the past `tau` time units at each time `t`.
 In other words, the working set `WS(t,tau)` is the collection of all memory accesses made in the time interval `(t-tau, t)`,
 and quantifies the amount of memory that a process requires over a time interval.
@@ -12,12 +12,12 @@ Therefore, keep in mind that comparing time-controlled workloads (e.g., those wh
 may not show the expected results.
 
 ## Tool Limitations
-This tool in early development, and might not do what you may expect. Please familiarize yourself with the limitations below.
+This tool is in early development, and might not do what you may expect. Please familiarize yourself with the limitations below.
 
  * The sampling interval is not exactly equidistant, but happens only at the end of superblocks or exit IR statements.
  * Sharing pages between threads is currently ignored, therefore the working set may be overestimated for multi-threaded programs.
- * If pages unmapped, and another page is later mapped under the same address, they are counted as the same page, even if the contents may be different. This is less critical for the working set size, but affects the total given in the end.
- * Only pages which are actually accessed are counted. For example, readahead is not considered.
+ * If pages are unmapped and a new page is later mapped under the same address, they are counted as the same page, even if the contents may be different. This is less critical for the working set size, but affects the total given in the end.
+ * Only pages which are actually accessed are counted. For example, readahead or prefetching are not considered.
 
 ## Compiling
 ### Prerequisites
