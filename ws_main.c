@@ -57,10 +57,9 @@
 
 struct pageaddr_order
 {
-  VgHashNode        top;  // page address
+  VgHashNode        top;  // page address, must be first
   unsigned long int count;
   Time              last_access;
-  HChar             where[0];  // file location for code pages
 };
 
 #define vgPlain_malloc(size) vgPlain_malloc ((const char *) __func__, size)
@@ -166,7 +165,7 @@ static Int   events_used = 0;
 #define WS_DEFAULT_EVERY 100000
 #define WS_DEFAULT_TAU WS_DEFAULT_EVERY
 
-static Bool clo_foo       = True;
+static Bool clo_locations = True;
 static Int  clo_pagesize  = WS_DEFAULT_PS;
 static Int  clo_every     = WS_DEFAULT_EVERY;
 static Int  clo_tau       = 0;
@@ -180,7 +179,7 @@ static const HChar* clo_filename = "ws.out.%p";
 
 static Bool ws_process_cmd_line_option(const HChar* arg)
 {
-   if VG_BOOL_CLO(arg, "--ws-foo", clo_foo) {}
+   if VG_BOOL_CLO(arg, "--ws-locations", clo_locations) {}
    else if VG_STR_CLO(arg, "--ws-file", clo_filename) {}
    else if VG_INT_CLO(arg, "--ws-pagesize", clo_pagesize) {}
    else if VG_INT_CLO(arg, "--ws-every", clo_every) {}
@@ -199,12 +198,12 @@ static Bool ws_process_cmd_line_option(const HChar* arg)
 static void ws_print_usage(void)
 {
    VG_(printf)(
-"    --ws-foo=no|yes       enable foo [yes]\n"
-"    --ws-file=<string>    file name to write results\n"
-"    --ws-pagesize=<int>   size of VM pages in bytes [%d]\n"
-"    --ws-time-unit=i|ms   time unit: instructions executed (default), milliseconds\n"
-"    --ws-every=<int>      sample WS every <int> time units [%d]\n"
-"    --ws-tau=<int>        consider all accesses made in the last tau time units [%d]\n",
+"    --ws-locations=no|yes   get location info for insn pages [yes]\n"
+"    --ws-file=<string>      file name to write results\n"
+"    --ws-pagesize=<int>     size of VM pages in bytes [%d]\n"
+"    --ws-time-unit=i|ms     time unit: instructions executed (default), milliseconds\n"
+"    --ws-every=<int>        sample WS every <int> time units [%d]\n"
+"    --ws-tau=<int>          consider all accesses made in the last tau time units [%d]\n",
    WS_DEFAULT_PS,
    WS_DEFAULT_EVERY,
    WS_DEFAULT_TAU
@@ -262,17 +261,13 @@ static inline Addr pageaddr(Addr addr)
 }
 
 // TODO: pages shared between threads?
-static void pageaccess(Addr pageaddr, VgHashTable *ht, const HChar *where) {
+static void pageaccess(Addr pageaddr, VgHashTable *ht) {
 
    struct pageaddr_order * page = VG_(HT_lookup) (ht, pageaddr);
    if (page == NULL) {
-      size_t len = (where != NULL) ? VG_(strlen) (where) + 1 : 0;
-      page = VG_(malloc) (sizeof (*page) + len);
+      page = VG_(malloc) (sizeof (*page));
       page->top.key = pageaddr;
       page->count = 0;
-      if (len > 0) {
-         VG_(strcpy) (page->where, where);
-      }
       VG_(HT_add_node) (ht, (VgHashNode *) page);
       //VG_(dmsg)("New page: %p\n", pageaddr);
    }
@@ -288,15 +283,14 @@ static void pageaccess(Addr pageaddr, VgHashTable *ht, const HChar *where) {
 static VG_REGPARM(2) void trace_data(Addr addr, SizeT size)
 {
    const Addr pa = pageaddr(addr);
-   pageaccess(pa, ht_data, NULL);
+   pageaccess(pa, ht_data);
    //VG_(dmsg)(" D %08lx,%lu -> page %lu\n", addr, size, pa);
 }
 
 static VG_REGPARM(2) void trace_instr(Addr addr, SizeT size)
 {
    const Addr pa = pageaddr(addr);
-   const HChar *where = VG_(describe_IP) (addr, NULL);
-   pageaccess(pa, ht_insn, where);
+   pageaccess(pa, ht_insn);
    //VG_(dmsg)("I  %08lx,%lu -> page %lu\n", addr, size, pa);
 }
 
@@ -745,15 +739,18 @@ static void print_pagestats(VgHashTable *ht, VgFile *fp)
       res[nres++] = (struct pageaddr_order *) nd;
    VG_(ssort) (res, nres, sizeof (res[0]), rescompare);
 
-   VG_(fprintf) (fp, "%8s %20s %14s", "count", "page", "last accessed");
-   if (ht == ht_insn) VG_(fprintf) (fp, " location");
+   VG_(fprintf) (fp, "%8s %20s %14s", "count", "page", "last-accessed");
+   if (ht == ht_insn && clo_locations) VG_(fprintf) (fp, " location");
    for (int i = 0; i < nres; ++i)
    {
       VG_(fprintf) (fp, "\n%8lu %018p %14llu",
                     res[i]->count,
                     (void*)res[i]->top.key,
                     res[i]->last_access);
-      if (ht == ht_insn) VG_(fprintf) (fp, " %s", res[i]->where);
+      if (ht == ht_insn && clo_locations) {
+         const HChar *where = VG_(describe_IP) (res[i]->top.key, NULL);
+         VG_(fprintf) (fp, " %s", where);
+      }
    }
    VG_(fprintf) (fp, "\n");
    // FIXME: leaks (res**)
@@ -773,23 +770,26 @@ static void print_ws_over_time(XArray *xa, VgFile *fp, int which)
    }
 
    // data points
+   unsigned long peak_i = 0, peak_d = 0;
    for (i = 0; i < VG_(sizeXA)(ws_at_time); i++) {
       WorkingSet **ws = VG_(indexXA)(ws_at_time, i);
+      const unsigned long t = (unsigned long)(*ws)->t;
+      const unsigned long pi = (*ws)->pages_insn;
+      const unsigned long pd = (*ws)->pages_data;
+      if (pi > peak_i) peak_i = pi;
+      if (pd > peak_d) peak_d = pd;
       if (0 == which) {
-         VG_(fprintf) (fp, "%12lu %8lu\n",
-                       (unsigned long)(*ws)->t,
-                       (*ws)->pages_insn);
+         VG_(fprintf) (fp, "%12lu %8lu\n", t, pi);
       } else if (1 == which) {
-         VG_(fprintf) (fp, "%12lu %8lu\n",
-                       (unsigned long)(*ws)->t,
-                       (*ws)->pages_insn);
+         VG_(fprintf) (fp, "%12lu %8lu\n", t, pd);
       } else {
-         VG_(fprintf) (fp, "%12lu %8lu %8lu\n",
-                       (unsigned long)(*ws)->t,
-                       (*ws)->pages_data,
-                       (*ws)->pages_insn);
+         VG_(fprintf) (fp, "%12lu %8lu %8lu\n", t, pi, pd);
       }
    }
+   VG_(fprintf) (fp, "\nInsn peak: %lu pages (%.0f kB)",
+                 peak_i, (peak_i * clo_pagesize) / 1024.f);
+   VG_(fprintf) (fp, "\nData peak: %lu pages (%.0f kB)\n",
+                 peak_d, (peak_d * clo_pagesize) / 1024.f);
 }
 
 static void ws_fini(Int exitcode)
