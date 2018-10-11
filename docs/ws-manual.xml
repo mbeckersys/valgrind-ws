@@ -1,0 +1,82 @@
+<?xml version="1.0"?> <!-- -*- sgml -*- -->
+<!DOCTYPE chapter PUBLIC "-//OASIS//DTD DocBook XML V4.2//EN"
+  "http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd">
+
+<chapter id="ws-manual" xreflabel="WorkingSet">
+
+<title>ws: a valgrind tool to compute the working set</title>
+
+<para>To use this tool, you must specify
+<option>--tool=ws</option> on the Valgrind
+command line.</para>
+
+
+<sect1 id="ws-manual.overview" xreflabel="Overview">
+<title>Overview</title>
+
+<para>ws is a Valgrind tool that measures the working set of a process. That is, it captures the
+set of references that have been made in the past tau time units at each time t. In other words,
+the working set WS(t,tau) is the collection of all memory accesses made in the time interval
+(t-tau, t), and quantifies the amount of memory that a process requires over a time
+interval.</para>
+<para>
+This program measures at page granularity, separately for code and data.
+</para>
+
+</sect1>
+
+
+<sect1 id="ws-manual.options" xreflabel="ws Command-line Options">
+<title>ws Command-line Options</title>
+
+<para>ws-specific command-line options are:</para>
+
+<!-- start of xi:include in the manpage -->
+<variablelist id="ws.opts.list">
+
+  <varlistentry id="opt.ws-file" xreflabel="--ws-file">
+    <term>
+      <option><![CDATA[--ws-file=<string> ]]></option>
+    </term>
+    <listitem>
+      <para>Choose file name of the output. If not given, it becomes ws.out.PID.</para>
+    </listitem>
+  </varlistentry>
+
+  <varlistentry id="opt.ws-every" xreflabel="--ws-every">
+    <term>
+      <option><![CDATA[--ws-every=<int> [default: 100000] ]]></option>
+    </term>
+    <listitem>
+      <para>Determines the density/number of samples in the working set profile. The working set
+      is computed every this much time units. Units are normally instructions, see
+      --ws-time-unit to change this behavior.</para>
+    </listitem>
+  </varlistentry>
+
+  <varlistentry id="opt.ws-tau" xreflabel="--ws-tau">
+    <term>
+      <option><![CDATA[--ws-tau=<int> [default: 100000] ]]></option>
+    </term>
+    <listitem>
+      <para>Determines the time horizon for which the working set is computed. At each
+      sample, the working set is given by all references being younger than this value.
+      Units, normally instructions, are defined by --ws-time-unit.</para>
+    </listitem>
+  </varlistentry>
+
+  <varlistentry id="opt.ws-time-unit" xreflabel="--ws-time-unit">
+    <term>
+      <option><![CDATA[--ws-time-unit=<i|ms> [default: i] ]]></option>
+    </term>
+    <listitem>
+      <para>Defines the time unit for --ws-every and --ws-tau. By default instructions (i).</para>
+    </listitem>
+  </varlistentry>
+
+</variablelist>
+<!-- end of xi:include in the manpage -->
+
+</sect1>
+
+</chapter>

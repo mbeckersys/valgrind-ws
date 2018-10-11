@@ -6,15 +6,18 @@ and quantifies the amount of memory that a process requires over a time interval
 
 This program measures at page granularity, separately for code and data.
 
-## Limitations
+## General Caveats
+Valgrind slows down the execution significantly, depending on the workload.
+Therefore, keep in mind that comparing time-controlled workloads (e.g., those which terminate after a fixed amount of time),
+may not show the expected results.
+
+## Tool Limitations
 This tool in early development, and might not do what you may expect. Please familiarize yourself with the limitations below.
 
-### Problems
-Untested for multi-threaded programs.
-
-### Precision
  * The sampling interval is not exactly equidistant, but happens only at the end of superblocks or exit IR statements.
  * Sharing pages between threads is currently ignored, therefore the working set may be overestimated for multi-threaded programs.
+ * If pages unmapped, and another page is later mapped under the same address, they are counted as the same page, even if the contents may be different. This is less critical for the working set size, but affects the total given in the end.
+ * Only pages which are actually accessed are counted. For example, readahead is not considered.
 
 ## Compiling
 ### Prerequisites
@@ -44,78 +47,138 @@ valgrind --tool=ws --ws-every=50000 <executable>
 
 The page size is assumed to be 4kB by default, and can be changed with `--ws-pagesize`.
 
+For a full list of options, use `--help`.
+
 ### Output
-The tool dumps the output to a file, one per PID. The file name can be chosen using `--ws-file`.
-First it prints the page access counters:
+A summary is printed on standard output:
+```
+==5931== ws-0.1, compute working set for data and instructions
+==5931== Copyright (C) 2018, and GNU GPL'd, by Martin Becker.
+==5931== Using Valgrind-3.13.0 and LibVEX; rerun with -h for copyright info
+==5931== Command: stress-ng -c 1 --cpu-ops=10
+==5931==
+==5931== Page size = 4096 bytes
+==5931== Computing WS every 100000 instructions
+==5931== Considering references in past 100000 instructions
+stress-ng: info:  [5931] defaulting to a 86400 second (1 day, 0.00 secs) run per stressor
+stress-ng: info:  [5931] dispatching hogs: 1 cpu
+==5932==
+==5932== Number of instructions: 604,599,465
+==5932== Number of WS samples:   6,047
+==5932== Dropped WS samples:     0
+==5932== Writing results to file '/tmp/ws.out.5932'
+==5932== ws finished
+stress-ng: info:  [5931] successful run completed in 15.33s
+==5931==
+==5931== Number of instructions: 1,003,719
+==5931== Number of WS samples:   12
+==5931== Dropped WS samples:     0
+==5931== Writing results to file '/tmp/ws.out.5931'
+==5931== ws finished
+```
+
+The working set data is written to a file, one per PID. The file name can be chosen using `--ws-file`.
+First it prints the header:
 ```
 Working Set Measurement by valgrind-ws-0.1
 
-Command: stress-ng --memrate 1 -t 2
-Instructions: 1044362
-Page size: 4096 B
-Time Unit: instructions
-Every: 10000 units
-Tau: 1000000 units
+Command:        stress-ng -c 1 --cpu-ops=10
+Instructions:   604,599,465
+Page size:      4096 B
+Time Unit:      instructions
+Every:          100,000 units
+Tau:            100,000 units
+```
 
-Code pages:
- 180 entries:
+Then, if `--ws-list-pages=yes` is specified, all used pages are listed (note that this could be a lot of output):
+```
+Code pages, 224 entries:
    count                 page  last-accessed location
-  247131 0x000000000005A25000        1037277 0x5A25DC0: strcasecmp (strcmp.S:114)
-  122343 0x000000000004008000        1044254 0x4008100: _dl_map_object (dl-load.c:2317)
-   76825 0x000000000004009000        1044316 0x4009810: _dl_lookup_symbol_x (dl-lookup.c:714)
-   74795 0x000000000004017000        1044245 0x4017B50: strlen (rtld-strlen.S:26)
-   56045 0x000000000005ABD000         386040 0x5ABD640: _dl_addr (dl-addr.c:126)
+382536864 0x00000000000040B000      604594200 0x40B000: djb2a (stress-cpu.c:645)
+163118903 0x000000000000411000      550704581 0x411000: stress_cpu_nsqrt (stress-cpu.c:402)
+45078797 0x000000000000421000      595770869 0x421000: stress_context.part.1 (stress-context.c:118)
+ 2434333 0x0000000000004A6000      600862075 0x4A6000: __bid64_mul (in /usr/bin/stress-ng)
+ 1272222 0x000000000000470000      387122000 0x470000: parse_opts (stress-ng.c:2044)
+ 1198336 0x000000000000488000      604594113 0x488000: __bid64_add (in /usr/bin/stress-ng)
+ 1169869 0x000000000000471000      604594130 0x471000: __divsc3 (in /usr/bin/stress-ng)
        .                    .              . .
        .                    .              . .
        .                    .              . .
 
-Data pages:
- 722 entries:
+Data pages, 792 entries:
    count                 page  last-accessed
-   62284 0x000000001FFEFFE000        1037716
-   61885 0x000000001FFEFFF000        1044344
-   15906 0x000000000004223000        1042794
-   12566 0x000000000004050000        1044329
-   11725 0x00000000000404F000        1043695
-    9604 0x000000001FFEFFD000        1037649
+ 5243008 0x000000001FFEFF1000      550650144
+ 5243008 0x000000001FFEFF2000      550655264
+ 5243008 0x000000001FFEFF4000      550665504
+ 5243008 0x000000001FFEFF0000      550645024
+ 5243008 0x000000001FFEFF5000      550670624
+ 5243008 0x000000001FFEFEF000      550639904
+ 5243008 0x000000001FFEFF3000      550660384
+ 5226628 0x000000001FFEFF6000      550675744
+ 5187150 0x000000001FFEFEE000      550634784
        .                    .              .
        .                    .              .
        .                    .              .
 ```
-The location info for code pages is the debug info belonging to
+The location info for code pages is taken from the debug info belonging to
 the instruction at the lowest address in the given page. This has not necessarily been executed.
 
-Then it prints the working set size (number of pages) over time:
+Finally, the tool prints the working set size (number of pages) over time:
 ```
 Working sets:
            t WSS_insn WSS_data
            0        0        0
-       10003       14       16
-       20012       30       16
-       30013       26       13
-       40015       35       13
-       50018       37       13
-       60018       37       13
-       70020       39       14
-       80021       25       10
-       90033       28       11
-      100035       27        5
-      110039       23       11
-      120041       10        1
-      130041       50        4
-      140042       43        5
-      150042       50        5
-      160055       43        4
-      170061       43        4
-      180063       51        5
+      100000       21       80
+      200000       20       78
+      300002       25       79
+      400006       85       93
+      500013      105      103
+      600014       59      177
+      700016        1      224
+      800018        1      224
+      900027       68       97
+     1000027       94       95
+     1100031       39       54
+     1200033        1        2
+     1300035        1        2
+     1400039        1        2
+     1500039        1        1
+     1600042        1        2
            .        .        .
            .        .        .
            .        .        .
 
-Insn peak: 107 pages (428 kB)
-Data peak: 238 pages (952 kB)
+Insn avg/peak/total:  1.4/105/224 pages (5/420/896 kB)
+Data avg/peak/total:  18.9/224/792 pages (75/896/3,168 kB)
 ```
 whereas the increments in column `t` are approximately the value of command line parameter `--every`.
+The avg/peak/total values are interpreted as follows:
+ * `avg` is the average number of the working set size over all samples in `t`.
+ * `total` is the working set size over the entire life time of the process, i.e., t=tau=inf.
+ * `peak` is the maximum working set size over all `t`.
+
+#### Interpretation of the example
+In this example, it can be seen that the workload initially requires around hundred instruction pages,
+which however decreases to an average of 1.4 pages later on (this is not surprising, since this particular
+workload -- stress-ng -- is designed to consume as little memory as possible when stationary).
+The peak working set size for instructions is at the program initialization, and about half of the
+total number of pages used over the entire life time.
+
+The picture is similar for data, where on average 18.9 pages have been referenced every 100,000
+instructions, and at most 224 pages.
+
+In summary, this process requires on average 80kB of memory every 100,000 instructions, which is
+much less than the total amount of memory shown by other tools, e.g., by the `time` command:
+
+```
+\time -v stress-ng -c 1 --cpu-ops=10
+        Command being timed: "stress-ng -c 1 --cpu-ops=10"
+        .
+        .
+        .
+        Maximum resident set size (kbytes): 4900
+        Average resident set size (kbytes): 0
+```
 
 ## Visualization
 TODO

@@ -166,6 +166,7 @@ static Int   events_used = 0;
 #define WS_DEFAULT_TAU WS_DEFAULT_EVERY
 
 static Bool clo_locations = True;
+static Bool clo_listpages = False;
 static Int  clo_pagesize  = WS_DEFAULT_PS;
 static Int  clo_every     = WS_DEFAULT_EVERY;
 static Int  clo_tau       = 0;
@@ -180,6 +181,7 @@ static const HChar* clo_filename = "ws.out.%p";
 static Bool ws_process_cmd_line_option(const HChar* arg)
 {
    if VG_BOOL_CLO(arg, "--ws-locations", clo_locations) {}
+   else if VG_BOOL_CLO(arg, "--ws-list-pages", clo_listpages) {}
    else if VG_STR_CLO(arg, "--ws-file", clo_filename) {}
    else if VG_INT_CLO(arg, "--ws-pagesize", clo_pagesize) {}
    else if VG_INT_CLO(arg, "--ws-every", clo_every) {}
@@ -198,12 +200,13 @@ static Bool ws_process_cmd_line_option(const HChar* arg)
 static void ws_print_usage(void)
 {
    VG_(printf)(
-"    --ws-locations=no|yes   get location info for insn pages [yes]\n"
-"    --ws-file=<string>      file name to write results\n"
-"    --ws-pagesize=<int>     size of VM pages in bytes [%d]\n"
-"    --ws-time-unit=i|ms     time unit: instructions executed (default), milliseconds\n"
-"    --ws-every=<int>        sample WS every <int> time units [%d]\n"
-"    --ws-tau=<int>          consider all accesses made in the last tau time units [%d]\n",
+"    --ws-file=<string>       file name to write results\n"
+"    --ws-list-pages=no|yes   print list of all accessed pages [no]\n"
+"    --ws-locations=no|yes    get location info for insn pages in listing [yes]\n"
+"    --ws-pagesize=<int>      size of VM pages in bytes [%d]\n"
+"    --ws-time-unit=i|ms      time unit: instructions executed (default), milliseconds\n"
+"    --ws-every=<int>         sample WS every <int> time units [%d]\n"
+"    --ws-tau=<int>           consider all accesses made in the last tau time units [%d]\n",
    WS_DEFAULT_PS,
    WS_DEFAULT_EVERY,
    WS_DEFAULT_TAU
@@ -260,7 +263,7 @@ static inline Addr pageaddr(Addr addr)
    return addr & ~(clo_pagesize-1);
 }
 
-// TODO: pages shared between threads?
+// TODO: pages shared between processes?
 static void pageaccess(Addr pageaddr, VgHashTable *ht) {
 
    struct pageaddr_order * page = VG_(HT_lookup) (ht, pageaddr);
@@ -274,8 +277,6 @@ static void pageaccess(Addr pageaddr, VgHashTable *ht) {
 
    page->count++;
    page->last_access = (long) get_time();
-   //const char pt = (ht == ht_data) ? 'D' : 'I';
-   //VG_(dmsg)("%c page acess @%ld\n", pt, page->last_access);
 
    maybe_compute_ws();
 }
@@ -284,14 +285,12 @@ static VG_REGPARM(2) void trace_data(Addr addr, SizeT size)
 {
    const Addr pa = pageaddr(addr);
    pageaccess(pa, ht_data);
-   //VG_(dmsg)(" D %08lx,%lu -> page %lu\n", addr, size, pa);
 }
 
 static VG_REGPARM(2) void trace_instr(Addr addr, SizeT size)
 {
    const Addr pa = pageaddr(addr);
    pageaccess(pa, ht_insn);
-   //VG_(dmsg)("I  %08lx,%lu -> page %lu\n", addr, size, pa);
 }
 
 static void flushEvents(IRSB* sb)
@@ -730,7 +729,7 @@ static void print_pagestats(VgHashTable *ht, VgFile *fp)
    int nres = 0;
 
    int nentry = VG_(HT_count_nodes) (ht);
-   VG_(fprintf) (fp, "%4d entries:\n", nentry);
+   VG_(fprintf) (fp, "%'d entries:\n", nentry);
 
    res = VG_(malloc) (nentry * sizeof (*res));  // ptr to ptr
    VG_(HT_ResetIter)(ht);
@@ -756,40 +755,41 @@ static void print_pagestats(VgHashTable *ht, VgFile *fp)
    // FIXME: leaks (res**)
 }
 
-static void print_ws_over_time(XArray *xa, VgFile *fp, int which)
+static void print_ws_over_time(XArray *xa, VgFile *fp)
 {
-   int i;
-
    // header
-   if (0 == which) {
-      VG_(fprintf) (fp, "%12s %8s\n", "t", "WSS_insn");
-   } else if (1 == which) {
-      VG_(fprintf) (fp, "%12s %8s\n", "t", "WSS_data");
-   } else {
-      VG_(fprintf) (fp, "%12s %8s %8s\n", "t", "WSS_insn", "WSS_data");
-   }
+   VG_(fprintf) (fp, "%12s %8s %8s\n", "t", "WSS_insn", "WSS_data");
 
    // data points
+   const int num_t = VG_(sizeXA)(ws_at_time);
    unsigned long peak_i = 0, peak_d = 0;
-   for (i = 0; i < VG_(sizeXA)(ws_at_time); i++) {
+   unsigned long long sum_i = 0, sum_d = 0;
+   for (int i = 0; i < num_t; i++) {
       WorkingSet **ws = VG_(indexXA)(ws_at_time, i);
       const unsigned long t = (unsigned long)(*ws)->t;
       const unsigned long pi = (*ws)->pages_insn;
       const unsigned long pd = (*ws)->pages_data;
+      sum_i += pi;
+      sum_d += pd;
       if (pi > peak_i) peak_i = pi;
       if (pd > peak_d) peak_d = pd;
-      if (0 == which) {
-         VG_(fprintf) (fp, "%12lu %8lu\n", t, pi);
-      } else if (1 == which) {
-         VG_(fprintf) (fp, "%12lu %8lu\n", t, pd);
-      } else {
-         VG_(fprintf) (fp, "%12lu %8lu %8lu\n", t, pi, pd);
-      }
+      VG_(fprintf) (fp, "%12lu %8lu %8lu\n", t, pi, pd);
    }
-   VG_(fprintf) (fp, "\nInsn peak: %lu pages (%.0f kB)",
-                 peak_i, (peak_i * clo_pagesize) / 1024.f);
-   VG_(fprintf) (fp, "\nData peak: %lu pages (%.0f kB)\n",
-                 peak_d, (peak_d * clo_pagesize) / 1024.f);
+
+   const long unsigned int total_i = (long unsigned int) VG_(HT_count_nodes) (ht_insn);
+   const long unsigned int total_d = (long unsigned int) VG_(HT_count_nodes) (ht_data);
+   const float avg_i = ((float)sum_i) / (num_t - 1);
+   const float avg_d = ((float)sum_d) / (num_t - 1);
+   VG_(fprintf) (fp, "\nInsn avg/peak/total:  %'.1f/%'lu/%'lu pages (%'u/%'u/%'u kB)",
+                 avg_i, peak_i, total_i,
+                 (unsigned int)((avg_i * clo_pagesize) / 1024.f),
+                 (unsigned int)((peak_i * clo_pagesize) / 1024.f),
+                 (unsigned int)((total_i * clo_pagesize) / 1024.f));
+   VG_(fprintf) (fp, "\nData avg/peak/total:  %'.1f/%'lu/%'lu pages (%'u/%'u/%'u kB)",
+                 avg_d, peak_d, total_d,
+                 (unsigned int)((avg_d * clo_pagesize) / 1024.f),
+                 (unsigned int)((peak_d * clo_pagesize) / 1024.f),
+                 (unsigned int)((total_d * clo_pagesize) / 1024.f));
 }
 
 static void ws_fini(Int exitcode)
@@ -800,9 +800,9 @@ static void ws_fini(Int exitcode)
    tl_assert(clo_fnname);
    tl_assert(clo_fnname[0]);
 
-   VG_(umsg)("Number of instructions: %lu\n", (unsigned long) guest_instrs_executed);
-   VG_(umsg)("Number of WS samples: %lu\n", num_samples);
-   VG_(umsg)("Dropped WS samples: %lu\n", drop_samples);
+   VG_(umsg)("Number of instructions: %'lu\n", (unsigned long) guest_instrs_executed);
+   VG_(umsg)("Number of WS samples:   %'lu\n", num_samples);
+   VG_(umsg)("Dropped WS samples:     %'lu\n", drop_samples);
 
    HChar* outfile = VG_(expand_file_name)("--ws-file", clo_filename);
    VG_(umsg)("Writing results to file '%s'\n", outfile);
@@ -822,29 +822,33 @@ static void ws_fini(Int exitcode)
 
    if (fp != NULL) {
       VG_(fprintf) (fp, "Working Set Measurement by valgrind-%s-%s\n\n", WS_NAME, WS_VERSION);
-      VG_(fprintf) (fp, "Command: %s", VG_(args_the_exename));
+      VG_(fprintf) (fp, "Command:        %s", VG_(args_the_exename));
       for (int i = 0; i < VG_(sizeXA)( VG_(args_for_client) ); i++) {
          HChar* arg = * (HChar**) VG_(indexXA)( VG_(args_for_client), i );
          VG_(fprintf)(fp, " %s", arg);
       }
-      VG_(fprintf) (fp, "\nInstructions: %lu\n", (unsigned long) guest_instrs_executed);
-      VG_(fprintf) (fp, "Page size: %d B\n", clo_pagesize);
-      VG_(fprintf) (fp, "Time Unit: %s\n", TimeUnit_to_string(clo_time_unit));
-      VG_(fprintf) (fp, "Every: %d units\n", clo_every);
-      VG_(fprintf) (fp, "Tau: %d units\n\n", clo_tau);
-      VG_(fprintf) (fp, "Code pages:\n");
-      print_pagestats (ht_insn, fp);
-      VG_(fprintf) (fp, "\nData pages:\n");
-      print_pagestats (ht_data, fp);
+      VG_(fprintf) (fp, "\nInstructions:   %'lu\n", (unsigned long) guest_instrs_executed);
+      VG_(fprintf) (fp, "Page size:      %d B\n", clo_pagesize);
+      VG_(fprintf) (fp, "Time Unit:      %s\n", TimeUnit_to_string(clo_time_unit));
+      VG_(fprintf) (fp, "Every:          %'d units\n", clo_every);
+      VG_(fprintf) (fp, "Tau:            %'d units\n\n", clo_tau);
 
-      VG_(fprintf) (fp, "\nWorking sets:\n");
-      print_ws_over_time (ws_at_time, fp, 2);
+      if (clo_listpages) {
+         VG_(fprintf) (fp, "Code pages, ");
+         print_pagestats (ht_insn, fp);
+         VG_(fprintf) (fp, "\nData pages, ");
+         print_pagestats (ht_data, fp);
+         VG_(fprintf) (fp, "\n");
+      }
+
+      VG_(fprintf) (fp, "Working sets:\n");
+      print_ws_over_time (ws_at_time, fp);
    }
 
    // cleanup
    VG_(fclose)(fp);
-   VG_(HT_destruct) (ht_data, VG_(free));  // FIXME: incomplete free
-   VG_(HT_destruct) (ht_insn, VG_(free));  // FIXME: incomplete free
+   VG_(HT_destruct) (ht_data, VG_(free));
+   VG_(HT_destruct) (ht_insn, VG_(free));
    VG_(deleteXA) (ws_at_time);
    VG_(umsg)("ws finished\n");
 }
