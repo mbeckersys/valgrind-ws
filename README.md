@@ -181,4 +181,13 @@ much less than the total amount of memory shown by other tools, e.g., by the `ti
 ```
 
 ## Visualization
-TODO
+To generate a plot of the working set, you may use the Python script `valgrind-ws-plot.py` in the
+folder tools. It uses matplotlib to generate an interactive plot. Example:
+```
+./valgrind-ws-plot.py --yscale=symlog ../tests/data/ws.out.6775
+```
+gives
+![Alt text](/tests/data/ws.out.6775.png?raw=true "Plot")
+
+The y-axis is in units of pages. The plot can also be exported to a file with
+command line option `--output=myfile.png`
