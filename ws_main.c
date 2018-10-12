@@ -177,6 +177,7 @@ static Int  clo_time_unit = TimeI;
  * line option --fnname. */
 static const HChar* clo_fnname = "main";
 static const HChar* clo_filename = "ws.out.%p";
+static HChar* int_filename;
 
 static Bool ws_process_cmd_line_option(const HChar* arg)
 {
@@ -435,14 +436,23 @@ void addEvent_Dw ( IRSB* sb, IRAtom* daddr, Int dsize )
 
 static void ws_post_clo_init(void)
 {
-   if (clo_tau == 0) clo_tau = clo_every;
+   // ensure we have a separate file for every process
+   const HChar *append = ".%p";
+   const int appendlen = (VG_(strstr) (clo_filename, "%p") == NULL) ? VG_(strlen) (append) : 0;
+   int_filename = (HChar*) VG_(malloc) (VG_(strlen) (clo_filename) + 1 + appendlen);
+   VG_(strcpy) (int_filename, clo_filename);
+   if (appendlen > 0) VG_(strcat) (int_filename, append);
+   VG_(umsg)("Output file: %s\n", int_filename);
 
+   // check intervals and times
+   if (clo_tau == 0) clo_tau = clo_every;
    if (clo_time_unit != TimeI) {
       VG_(umsg)("Warning: time unit %s not implemented, yet. Fallback to instructions",
                 TimeUnit_to_string(clo_time_unit));
       clo_time_unit = TimeI;
    }
 
+   // verbose a bit
    VG_(umsg)("Page size = %d bytes\n", clo_pagesize);
    VG_(umsg)("Computing WS every %d %s\n", clo_every,
              TimeUnit_to_string(clo_time_unit));
@@ -804,7 +814,7 @@ static void ws_fini(Int exitcode)
    VG_(umsg)("Number of WS samples:   %'lu\n", num_samples);
    VG_(umsg)("Dropped WS samples:     %'lu\n", drop_samples);
 
-   HChar* outfile = VG_(expand_file_name)("--ws-file", clo_filename);
+   HChar* outfile = VG_(expand_file_name)("--ws-file", int_filename);
    VG_(umsg)("Writing results to file '%s'\n", outfile);
    VgFile *fp = VG_(fopen)(outfile, VKI_O_CREAT|VKI_O_TRUNC|VKI_O_WRONLY,
                                     VKI_S_IRUSR|VKI_S_IWUSR);
@@ -855,6 +865,7 @@ static void ws_fini(Int exitcode)
    VG_(HT_destruct) (ht_data, VG_(free));
    VG_(HT_destruct) (ht_insn, VG_(free));
    VG_(deleteXA) (ws_at_time);
+   if (int_filename != clo_filename) VG_(free) ((void*)int_filename);
    VG_(umsg)("ws finished\n");
 }
 
