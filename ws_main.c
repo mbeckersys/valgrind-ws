@@ -821,6 +821,7 @@ static void ws_fini(Int exitcode)
    }
 
    if (fp != NULL) {
+       // preamble
       VG_(fprintf) (fp, "Working Set Measurement by valgrind-%s-%s\n\n", WS_NAME, WS_VERSION);
       VG_(fprintf) (fp, "Command:        %s", VG_(args_the_exename));
       for (int i = 0; i < VG_(sizeXA)( VG_(args_for_client) ); i++) {
@@ -832,17 +833,21 @@ static void ws_fini(Int exitcode)
       VG_(fprintf) (fp, "Time Unit:      %s\n", TimeUnit_to_string(clo_time_unit));
       VG_(fprintf) (fp, "Every:          %'d units\n", clo_every);
       VG_(fprintf) (fp, "Tau:            %'d units\n\n", clo_tau);
+      VG_(fprintf) (fp, "--\n\n");
 
+      // page listing
       if (clo_listpages) {
          VG_(fprintf) (fp, "Code pages, ");
          print_pagestats (ht_insn, fp);
          VG_(fprintf) (fp, "\nData pages, ");
          print_pagestats (ht_data, fp);
-         VG_(fprintf) (fp, "\n");
+         VG_(fprintf) (fp, "\n--\n\n");
       }
 
+      // working set data
       VG_(fprintf) (fp, "Working sets:\n");
       print_ws_over_time (ws_at_time, fp);
+      VG_(fprintf) (fp, "\n--\n");
    }
 
    // cleanup
