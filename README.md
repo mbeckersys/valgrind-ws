@@ -21,12 +21,12 @@ This tool is in early development, and might not do what you may expect. Please 
 
 ## Compiling
 ### Prerequisites
-Valgrind 3.13. Other versions are untested.
+Valgrind 3.13 -- 3.14. Other versions are untested.
 
 ### Build Process
  1. Clone this repository into your valgrind sources, such that it resides in the same directory as `lackey`. In the following, we assume the new directory is called `ws`.
  2. Edit valgrind's `Makefile.am`, adding the new directory `ws` to the `TOOLS` variable
- 3. Edit `configure.in`, adding `ws/Makefile`, `ws/docs/Makefile` and `ws/tests/Makefile` to the `AC_OUTPUT` list
+ 3. Edit `configure.ac`, adding `ws/Makefile` to the `AC_CONFIG_FILES` list
  4. Run
 ```
 autogen.sh

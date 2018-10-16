@@ -42,6 +42,20 @@
 #include "pub_tool_debuginfo.h"
 #include "pub_tool_xtree.h"
 #include "pub_tool_xarray.h"
+#include "valgrind.h"
+
+/*------------------------------------------------------------*/
+/*--- version-specific defs                                ---*/
+/*------------------------------------------------------------*/
+
+#if defined(__VALGRIND_MAJOR__) && defined(__VALGRIND_MINOR__) \
+    && (__VALGRIND_MAJOR__ >= 3 && __VALGRIND_MINOR__ >= 14)
+   #define WS_EPOCH 1
+#else
+   #undef WS_EPOCH
+#endif
+#warning "VG-major: " __VALGRIND_MAJOR__
+#warning "VG-minor: " __VALGRIND_MINOR__
 
 /*------------------------------------------------------------*/
 /*--- tool info                                            ---*/
@@ -60,6 +74,9 @@ struct pageaddr_order
   VgHashNode        top;  // page address, must be first
   unsigned long int count;
   Time              last_access;
+  #ifdef WS_EPOCH
+  DiEpoch           ep;  //< FIXME: why is this timestamp needed for access?
+  #endif
 };
 
 #define vgPlain_malloc(size) vgPlain_malloc ((const char *) __func__, size)
@@ -278,6 +295,9 @@ static void pageaccess(Addr pageaddr, VgHashTable *ht) {
 
    page->count++;
    page->last_access = (long) get_time();
+   #ifdef WS_EPOCH
+   page->ep = VG_(current_DiEpoch)();
+   #endif
 
    maybe_compute_ws();
 }
@@ -757,7 +777,11 @@ static void print_pagestats(VgHashTable *ht, VgFile *fp)
                     (void*)res[i]->top.key,
                     res[i]->last_access);
       if (ht == ht_insn && clo_locations) {
+         #ifdef WS_EPOCH
+         const HChar *where = VG_(describe_IP) (res[i]->ep, res[i]->top.key, NULL);
+         #else
          const HChar *where = VG_(describe_IP) (res[i]->top.key, NULL);
+         #endif
          VG_(fprintf) (fp, " %s", where);
       }
    }
