@@ -33,24 +33,28 @@ static void release_page(pagetab_t *pt) {
     pt->tab[pt->num--] = NULL;
 }
 
-static int touch_pages(pagetab_t *pt) {
-    for (int p = 0; p < pt->num; ++p) {
+static int touch_pages(pagetab_t *pt, int stride) {
+    for (int p = 0; p <= (pt->num - stride); p+=stride) {
         char*first = (char*)pt->tab[p];
-        *first = p;
+        *first = 0x42;
     }
 }
 
 int main(int argc, char**argv) {
     // arguments
-    int maxp = 1024, cycles = 10;
+    int maxp = 1024, cycles = 10, stride = 1;
     if (argc > 1) {
         maxp = atoi(argv[1]);
     }
     if (argc > 2) {
         cycles = atoi(argv[2]);
     }
+    if (argc > 3) {
+        stride = atoi(argv[3]);
+    }
     if (maxp < 0) maxp = -maxp;
-    if (cycles < 0) cycles=-cycles;
+    if (cycles < 0) cycles = -cycles;
+    if (stride < 1) stride = 1;
 
     // set up page table
     PS = sysconf(_SC_PAGESIZE);
@@ -64,13 +68,13 @@ int main(int argc, char**argv) {
         DPRINT("Cycle %d up...\n", c);
         for (int p = 0; p < maxp; ++p) {
             claim_page(&pt);
-            touch_pages(&pt);
+            touch_pages(&pt, stride);
         }
         // ramp down
         DPRINT("Cycle %d down...\n", c);
         for (int p = 0; p < maxp; ++p) {
             release_page(&pt);
-            touch_pages(&pt);
+            touch_pages(&pt, stride);
         }
     }
 

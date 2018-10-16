@@ -27,11 +27,11 @@ def plot_all(stats, info, args):
     wssi = [d['wssi'] for d in stats]
     wssd = [d['wssd'] for d in stats]
 
-    fig = plt.figure(figsize=(15, 10))
+    fig = plt.figure(figsize=(10, 5))
     ax = fig.add_subplot('111')
     mid = ind[0] + (ind[-1] - ind[0]) / 2
 
-    ax.plot(ind, wssi, color='r')
+    ax.plot(ind, wssi, color='r', linestyle='-.')
     leg = ['insn']
     avgi = np.average(wssi)
     ax.plot([ind[0], mid, ind[-1]], [avgi] * 3, color='k', marker='x', linestyle='--')

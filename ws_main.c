@@ -184,6 +184,7 @@ static Int   events_used = 0;
 
 static Bool clo_locations = True;
 static Bool clo_listpages = False;
+static Bool clo_peakinfo  = False
 static Int  clo_pagesize  = WS_DEFAULT_PS;
 static Int  clo_every     = WS_DEFAULT_EVERY;
 static Int  clo_tau       = 0;
@@ -206,6 +207,7 @@ static Bool ws_process_cmd_line_option(const HChar* arg)
    else if VG_INT_CLO(arg, "--ws-tau", clo_tau) { tl_assert(clo_tau > 0); }
    else if VG_XACT_CLO(arg, "--ws-time-unit=i", clo_time_unit, TimeI)  {}
    else if VG_XACT_CLO(arg, "--ws-time-unit=ms", clo_time_unit, TimeMS) {}
+   else if VG_BOOL_CLO(arg, "--ws-peakinfo", clo_peakinfo) {}
    else return False;
 
    tl_assert(clo_fnname);
@@ -220,7 +222,8 @@ static void ws_print_usage(void)
    VG_(printf)(
 "    --ws-file=<string>       file name to write results\n"
 "    --ws-list-pages=no|yes   print list of all accessed pages [no]\n"
-"    --ws-locations=no|yes    get location info for insn pages in listing [yes]\n"
+"    --ws-locations=no|yes    collect location info for insn pages in listing [yes]\n"
+"    --ws-peakinfo=no|yes     collect info for peaks in working set [no]\n"
 "    --ws-pagesize=<int>      size of VM pages in bytes [%d]\n"
 "    --ws-time-unit=i|ms      time unit: instructions executed (default), milliseconds\n"
 "    --ws-every=<int>         sample WS every <int> time units [%d]\n"
@@ -272,7 +275,7 @@ static Time get_time(void)
          return VG_(read_millisecond_timer)() - start_time_ms;
       }
    } else {
-      tl_assert2(0, "bad --time-unit value");
+      tl_assert2(0, "bad --ws-time-unit value");
    }
 }
 
@@ -540,6 +543,11 @@ void compute_ws(Time now_time)
    ws->pages_insn = recently_used_pages (ht_insn, now_time);
    ws->pages_data = recently_used_pages (ht_data, now_time);
    num_samples++;
+
+   if (clo_peakinfo) {
+      // TODO: test for peak, annotate if it is one
+   }
+
    VG_(addToXA) (ws_at_time, &ws);
 }
 
