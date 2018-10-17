@@ -157,6 +157,11 @@ The avg/peak/total values are interpreted as follows:
  * `total` is the working set size over the entire life time of the process, i.e., t=tau=inf.
  * `peak` is the maximum working set size over all `t`.
 
+### Peak Detection
+With option `--ws-peak=yes`, the tool tries to detect sudden jumps in the working set sizes, and
+annotates those peaks with the current call stack. Since the peaks are references made in the past,
+we annotate the sample before the peak.
+
 #### Interpretation of the example
 In this example, it can be seen that the workload initially requires around hundred instruction pages,
 which however decreases to an average of 1.4 pages later on (this is not surprising, since this particular

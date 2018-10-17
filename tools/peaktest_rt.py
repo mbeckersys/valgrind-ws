@@ -1,17 +1,18 @@
 #!/usr/bin/python
 
 # stream implementation of algorithm from https://stackoverflow.com/a/22640362/6029703
+import sys
 import collections
 import numpy as np
 import pylab
-import math
+import re
 
-lag = 30  # moving window length
-threshold = 3  # peak is detected if data point is that many stddevs away from mean
-influence = .1  # how much peaks change thresholds. 0=none/robust, 1=fast/reactive
+
+lag = 100  # moving window length
+threshold = 10  # peak is detected if data point is that many variances away from mean
+influence = .5  # how much peaks change thresholds. 0=none/robust, 1=fast/reactive
 typefilt = 'exp'  # exp=exponential (lower memory footprint, less accurate), window=explicit
 assert lag >= 1
-
 
 alpha = float(2) / (lag + 1)
 
@@ -35,7 +36,7 @@ def peak_detect(y):
 
     def update_var(f):
         """moving variance"""
-        if pd_data == 0:
+        if pd_data['k'] == 0:
             var = 0
         else:
             if typefilt == 'window':
@@ -46,7 +47,8 @@ def peak_detect(y):
         pd_data['movingVar'] = var
         return var
 
-    is_peak = abs(y - pd_data['movingAvg']) > threshold * math.sqrt(pd_data['movingVar'])
+    is_peak = abs(y - pd_data['movingAvg']) > threshold * pd_data['movingVar']
+    # 'movingVar'])
     if pd_data['k'] > 0 and is_peak:
         # peak: check direction and filter
         pk = 1 if y > pd_data['movingAvg'] else -1
@@ -76,12 +78,22 @@ def peak_detect(y):
 # test case
 ############
 
-# data stream
-stream = np.array(
-    [1, 1, 1.1, 1, 0.9, 1, 1, 1.1, 1, 0.9, 1, 1.1, 1, 1, 0.9, 1, 1, -1.1, 1, 1, 1, 1, 1.1, 0.9, 1,
-     1.1, 1, 1, 0.9, 1, 1.1, -1, 1, 1.1, 1, 0.8, 0.9, 1, 1.2, 0.9, 1, 1, 1.1, 1.2, 1, 1.5, 1, 4, 2,
-     5, 3, 2, 1, 1, 1, 0.9, 1, 1, 3, 2.6, 4, 3, 3.2, 2, 1, 1, 0.8, 4, 4, 2, 2.5, 1, 1, 1,
-     1, 1, 1.1, 1, 0.9, 1, 1, 1.1, 1, 0.9, 1, 1.1, 1, 1, 0.9, 1, 1, -1.1, 1, 1, 1, 1, 1.1, 0.9, 1])
+if len(sys.argv) > 1:
+    datafile = sys.argv[1]
+    stream = []
+    with open(datafile, 'r') as f:
+        for line in f:
+            m = re.search(r"(\d+)[\s\t]+(\d+)[\s\t]+(\d+)", line)
+            if m:
+                stream.append(int(m.group(3)))  # 2=insn, 3=data
+    stream = np.array(stream)
+else:
+    # data stream
+    stream = np.array(
+        [1, 1, 1.1, 1, 0.9, 1, 1, 1.1, 1, 0.9, 1, 1.1, 1, 1, 0.9, 1, 1, -1.1, 1, 1, 1, 1, 1.1, 0.9, 1,
+         1.1, 1, 1, 0.9, 1, 1.1, -1, 1, 1.1, 1, 0.8, 0.9, 1, 1.2, 0.9, 1, 1, 1.1, 1.2, 1, 1.5, 1, 4, 2,
+         5, 3, 2, 1, 1, 1, 0.9, 1, 1, 3, 2.6, 4, 3, 3.2, 2, 1, 1, 0.8, 4, 4, 2, 2.5, 1, 1, 1,
+         1, 1, 1.1, 1, 0.9, 1, 1, 1.1, 1, 0.9, 1, 1.1, 1, 1, 0.9, 1, 1, -1.1, 1, 1, 1, 1, 1.1, 0.9, 1])
 
 # internal data of peak detector
 w = collections.deque([], maxlen=lag) if typefilt == 'window' else None  # ring buffer
@@ -98,26 +110,32 @@ dbg_var = np.zeros(len(stream))
 signals = np.zeros(len(stream))
 
 # streaming of data, one by one
+pre = None
+pk = 0
 for i in range(0, len(stream)):
     dbg_idx = i
     signals[i] = peak_detect(stream[i])
+    if i > 0 and signals[i] != pre:
+        pre = signals[i]
+        pk += 1
+    pre = signals[i]
+print "Peaks: {}".format(pk)
 
 dbg_std = np.sqrt(dbg_var)
 
 # Plot result
 result = np.asarray(signals)
-pylab.subplot(211)
-pylab.plot(np.arange(1, len(stream)+1), stream, color='k')
-pylab.plot(np.arange(1, len(stream)+1), dbg_filt, color='red', lw=1)
-pylab.plot(np.arange(1, len(stream)+1), dbg_avg, color="cyan", lw=2)
-pylab.plot(np.arange(1, len(stream)+1), dbg_avg + threshold * dbg_std, color="green", lw=2)
-pylab.plot(np.arange(1, len(stream)+1), dbg_avg - threshold * dbg_std, color="green", lw=2)
-pylab.ylim(-1.5, 5)
-pylab.grid()
+ax1 = pylab.subplot(211)
+ax1.plot(np.arange(1, len(stream)+1), stream, color='k')
+ax1.plot(np.arange(1, len(stream)+1), dbg_filt, color='red', lw=1)
+ax1.plot(np.arange(1, len(stream)+1), dbg_avg, color="cyan", lw=2)
+ax1.plot(np.arange(1, len(stream)+1), dbg_avg + threshold * dbg_std, color="green", lw=2)
+ax1.plot(np.arange(1, len(stream)+1), dbg_avg - threshold * dbg_std, color="green", lw=2)
+ax1.grid()
 pylab.legend(['signal', 'filtered', 'avg', 'thresh', 'thresh'])
 pylab.title("mode={}".format(typefilt))
 
-pylab.subplot(212)
+pylab.subplot(212, sharex=ax1)
 pylab.step(np.arange(1, len(stream)+1), result, color="red", lw=2)
 pylab.ylim(-1.5, 1.5)
 pylab.grid()

@@ -40,6 +40,8 @@
 #include "pub_tool_hashtable.h"
 #include "pub_tool_mallocfree.h"
 #include "pub_tool_debuginfo.h"
+#include "pub_tool_stacktrace.h"
+#include "pub_tool_threadstate.h"
 #include "pub_tool_xtree.h"
 #include "pub_tool_xarray.h"
 #include "valgrind.h"
@@ -48,14 +50,20 @@
 /*--- version-specific defs                                ---*/
 /*------------------------------------------------------------*/
 
+#define DEBUG
+
 #if defined(__VALGRIND_MAJOR__) && defined(__VALGRIND_MINOR__) \
     && (__VALGRIND_MAJOR__ >= 3 && __VALGRIND_MINOR__ >= 14)
    #define WS_EPOCH 1
 #else
    #undef WS_EPOCH
 #endif
-#warning "VG-major: " __VALGRIND_MAJOR__
-#warning "VG-minor: " __VALGRIND_MINOR__
+
+#ifdef WS_EPOCH
+   #define EPOCH_ARG(x) x,
+#else
+   #define EPOCH_ARG(x) /* nix */
+#endif
 
 /*------------------------------------------------------------*/
 /*--- tool info                                            ---*/
@@ -66,8 +74,15 @@
 #define WS_DESC "compute working set for data and instructions"
 
 /*------------------------------------------------------------*/
+/*--- macros                                            ---*/
+/*------------------------------------------------------------*/
+#define FABS(x) ((x < 0.f) ? -x : x)
+
+/*------------------------------------------------------------*/
 /*--- type definitions                                     ---*/
 /*------------------------------------------------------------*/
+
+typedef unsigned long pagecount;
 
 struct pageaddr_order
 {
@@ -75,7 +90,7 @@ struct pageaddr_order
   unsigned long int count;
   Time              last_access;
   #ifdef WS_EPOCH
-  DiEpoch           ep;  //< FIXME: why is this timestamp needed for access?
+  DiEpoch           ep;
   #endif
 };
 
@@ -109,10 +124,33 @@ typedef
 typedef
    struct {
       Time t;
-      unsigned long pages_insn;
-      unsigned long pages_data;
+      pagecount pages_insn;
+      pagecount pages_data;
+      int       stackid;    ///< if peak-detect is on and this wset is a peak, then this is the ID of the according call stack
+   #ifdef DEBUG
+      float     mAvg, mVar;
+   #endif
    }
    WorkingSet;
+
+/**
+ * @brief internal data of peak detector
+ */
+typedef
+   struct {
+      // states
+      unsigned  k;
+      short int peak_pre;
+      float     filt_pre;
+      float     movingAvg;
+      float     movingVar;
+      // params
+      unsigned  window;
+      float     thresh;     ///< min. z-score to be counted as peak
+      float     influence;  ///< coefficient for filtering out peaks
+      float     exp_alpha;  ///< coefficient for exponential moving filters
+   }
+   PeakDetect;
 
 /*------------------------------------------------------------*/
 /*--- prototypes                                           ---*/
@@ -171,6 +209,8 @@ static XArray *ws_at_time;
 static Event events[N_EVENTS];
 static Int   events_used = 0;
 
+PeakDetect   pd_data, pd_insn;
+
 /*------------------------------------------------------------*/
 /*--- Command line options                                 ---*/
 /*------------------------------------------------------------*/
@@ -181,14 +221,22 @@ static Int   events_used = 0;
 #define WS_DEFAULT_PS 4096
 #define WS_DEFAULT_EVERY 100000
 #define WS_DEFAULT_TAU WS_DEFAULT_EVERY
+#define WS_DEFAULT_PEAKT 3
+#define WS_DEFAULT_PEAKW 30
+#define WS_DEFAULT_PEAKINFL 0.5f ///< default value for peak filter
 
-static Bool clo_locations = True;
-static Bool clo_listpages = False;
-static Bool clo_peakinfo  = False
-static Int  clo_pagesize  = WS_DEFAULT_PS;
-static Int  clo_every     = WS_DEFAULT_EVERY;
-static Int  clo_tau       = 0;
-static Int  clo_time_unit = TimeI;
+// user inputs:
+static Bool  clo_locations  = True;
+static Bool  clo_listpages  = False;
+static Bool  clo_peak   = False;
+static Int   clo_peakthresh = WS_DEFAULT_PEAKT;  // FIXME: float?
+static Int   clo_peakwindow = WS_DEFAULT_PEAKW;
+static Float clo_peakinfl   = WS_DEFAULT_PEAKINFL;  // FIXME: from clo
+static Int   clo_pagesize   = WS_DEFAULT_PS;
+static Int   clo_every      = WS_DEFAULT_EVERY;
+static Int   clo_tau        = 0;
+static Int   clo_time_unit  = TimeI;
+static Int   clo_stackdepth = 30;
 
 /* The name of the function of which the number of calls (under
  * --basic-counts=yes) is to be counted, with default. Override with command
@@ -207,7 +255,9 @@ static Bool ws_process_cmd_line_option(const HChar* arg)
    else if VG_INT_CLO(arg, "--ws-tau", clo_tau) { tl_assert(clo_tau > 0); }
    else if VG_XACT_CLO(arg, "--ws-time-unit=i", clo_time_unit, TimeI)  {}
    else if VG_XACT_CLO(arg, "--ws-time-unit=ms", clo_time_unit, TimeMS) {}
-   else if VG_BOOL_CLO(arg, "--ws-peakinfo", clo_peakinfo) {}
+   else if VG_BOOL_CLO(arg, "--ws-peak", clo_peak) {}
+   else if VG_INT_CLO(arg, "--ws-peak-window", clo_peakwindow) { tl_assert(clo_peakwindow > 0); }
+   else if VG_INT_CLO(arg, "--ws-peak-thresh", clo_peakthresh) { tl_assert(clo_peakthresh > 0); }
    else return False;
 
    tl_assert(clo_fnname);
@@ -223,11 +273,15 @@ static void ws_print_usage(void)
 "    --ws-file=<string>       file name to write results\n"
 "    --ws-list-pages=no|yes   print list of all accessed pages [no]\n"
 "    --ws-locations=no|yes    collect location info for insn pages in listing [yes]\n"
-"    --ws-peakinfo=no|yes     collect info for peaks in working set [no]\n"
+"    --ws-peak=no|yes         collect info for peaks in working set [no]\n"
+"    --ws-peak-window=<int>   window length (in samples) for peak detection [%d]\n"
+"    --ws-peak-thresh=<int>   threshold in multiples of variance for peaks [%d]\n"
 "    --ws-pagesize=<int>      size of VM pages in bytes [%d]\n"
 "    --ws-time-unit=i|ms      time unit: instructions executed (default), milliseconds\n"
 "    --ws-every=<int>         sample WS every <int> time units [%d]\n"
 "    --ws-tau=<int>           consider all accesses made in the last tau time units [%d]\n",
+   WS_DEFAULT_PEAKW,
+   WS_DEFAULT_PEAKT,
    WS_DEFAULT_PS,
    WS_DEFAULT_EVERY,
    WS_DEFAULT_TAU
@@ -248,6 +302,54 @@ static const HChar* TimeUnit_to_string(TimeUnit time_unit)
    case TimeMS: return "ms";
    default:     tl_assert2(0, "TimeUnit_to_string: unrecognised TimeUnit");
    }
+}
+
+static void init_peakd(PeakDetect *pd) {
+   pd->filt_pre = 0.f;
+   pd->peak_pre = 0;
+   pd->k = 0;
+   pd->movingAvg = 0.f;
+   pd->movingVar = 0.f;
+
+   pd->window = clo_peakwindow;
+   pd->exp_alpha = 2.f / (clo_peakwindow + 1);
+   pd->influence = (float) clo_peakinfl;
+   pd->thresh = (float) clo_peakthresh;
+}
+
+static Bool peak_detect(PeakDetect *pd, pagecount y) {
+   short int pk = 0;
+   float filt = (float) y;
+
+   // detect peaks and filter them
+   float y0 = y - pd->movingAvg;
+   const Bool is_peak = FABS(y0) > (pd->thresh * pd->movingVar);
+   if (pd->k >= pd->window && is_peak) {
+      pk = (y > pd->movingAvg) ? 1 : -1;
+      filt = pd->influence * y + (1 - pd->influence) * pd->filt_pre;
+   }
+
+   // moving variance (must be calc'd first)
+   if (0 < pd->k) {
+      const float diff = ((float) filt) - pd->movingAvg;  // XXX: important, previous average.
+      pd->movingVar = (1.f - pd->exp_alpha) * (pd->movingVar + pd->exp_alpha * diff * diff);
+   } else {
+      pd->movingVar = 0.f;
+   }
+
+   // moving avg
+   if (0 < pd->k) {
+      pd->movingAvg = pd->exp_alpha * filt + (1.f - pd->exp_alpha) * pd->movingAvg;
+   } else {
+      pd->movingAvg = (float) filt;
+   }
+
+   if (pd->k < pd->window) pd->k++;
+   pd->filt_pre = filt;
+
+   Bool ret = pk != pd->peak_pre;
+   pd->peak_pre = pk;
+   return ret;
 }
 
 static Time get_time(void)
@@ -475,6 +577,10 @@ static void ws_post_clo_init(void)
       clo_time_unit = TimeI;
    }
 
+   // peak filters
+   init_peakd(&pd_data);
+   init_peakd(&pd_insn);
+
    // verbose a bit
    VG_(umsg)("Page size = %d bytes\n", clo_pagesize);
    VG_(umsg)("Computing WS every %d %s\n", clo_every,
@@ -530,6 +636,81 @@ unsigned long recently_used_pages(VgHashTable *ht, Time now_time)
    return cnt;
 }
 
+typedef
+   struct {
+      HChar *str;
+      int    rem;
+   }
+   callstack;
+
+/**
+ * @brief actually assemble callstack string
+ */
+static void strstack_make
+(UInt n, EPOCH_ARG(DiEpoch ep) Addr ip, void* uu_opaque)
+{
+   callstack *cs = (callstack*) uu_opaque;
+
+   // inlining
+   InlIPCursor *iipc = VG_(new_IIPC)(EPOCH_ARG(ep) ip);
+   do {
+      const HChar *buf = VG_(describe_IP)(EPOCH_ARG(ep) ip, iipc);  // FIXME: shorten
+      VG_(strncat) (cs->str, buf, cs->rem-1);
+      VG_(strncat) (cs->str, "|", 1);
+      cs->rem -= VG_(strlen) (buf + 1);
+   } while (VG_(next_IIPC)(iipc));
+}
+
+/**
+ * @brief determine max. length of callstack string
+ */
+static void strstack_maxlen
+(UInt n, EPOCH_ARG(DiEpoch ep) Addr ip, void* uu_opaque)
+{
+   callstack *cs = (callstack*) uu_opaque;
+
+   // inlining
+   InlIPCursor *iipc = VG_(new_IIPC)(EPOCH_ARG(ep) ip);
+   do {
+      const HChar *buf = VG_(describe_IP)(EPOCH_ARG(ep) ip, iipc);
+      unsigned long l = VG_(strlen) (buf) + 1;
+      cs->rem += l;
+   } while (VG_(next_IIPC)(iipc));
+   VG_(delete_IIPC)(iipc);
+}
+
+/**
+ * @brief get callstack as string
+ */
+static const char* get_callstack(void) {
+   Addr*ips = (Addr*) VG_(malloc) (sizeof(Addr)*clo_stackdepth);
+
+#ifdef WS_EPOCH
+   DiEpoch ep = VG_(current_DiEpoch)();
+#endif
+
+   // After this call, the IPs we want are in ips[0]..ips[n_ips-1].
+   Int n_ips = VG_(get_StackTrace)(VG_(get_running_tid)(),
+                                   ips, clo_stackdepth,
+                                   NULL /*array to dump SP values in*/,
+                                   NULL /*array to dump FP values in*/,
+                                   0 /*first_ip_delta*/);
+
+   callstack cs;
+   // pre-calculate length of string
+   cs.rem = 0;
+   VG_(apply_StackTrace) (strstack_maxlen, (void*)&cs, EPOCH_ARG(ep) ips, n_ips );
+
+   cs.str = (HChar*) VG_(malloc) (cs.rem * sizeof(HChar));
+   cs.str[0] = 0;
+
+   // assemble string
+   // FIXME: detect recursive calls and compress string
+   VG_(apply_StackTrace) (strstack_make, (void*)&cs, EPOCH_ARG(ep) ips, n_ips);
+   VG_(free) (ips);
+   return cs.str;
+}
+
 static
 void compute_ws(Time now_time)
 {
@@ -542,10 +723,19 @@ void compute_ws(Time now_time)
    ws->t = now_time;
    ws->pages_insn = recently_used_pages (ht_insn, now_time);
    ws->pages_data = recently_used_pages (ht_data, now_time);
+   ws->stackid = -1;
    num_samples++;
 
-   if (clo_peakinfo) {
-      // TODO: test for peak, annotate if it is one
+   if (clo_peak) {
+      #ifdef DEBUG
+         ws->mAvg = pd_data.movingAvg;
+         ws->mVar = pd_data.movingVar;
+      #endif
+      if (peak_detect(&pd_data, ws->pages_data) || peak_detect(&pd_insn, ws->pages_insn)) {
+         const char *cs = get_callstack();  // TODO: put somewhere and free at end
+         VG_(umsg) ("WSS peak (insn=%lu, data=%lu) at: \n%s\n\n", ws->pages_insn, ws->pages_data, cs);
+         ws->stackid = 1;
+      }
    }
 
    VG_(addToXA) (ws_at_time, &ws);
@@ -797,15 +987,19 @@ static void print_pagestats(VgHashTable *ht, VgFile *fp)
    // FIXME: leaks (res**)
 }
 
-static void print_ws_over_time(XArray *xa, VgFile *fp)
+static long long int print_ws_over_time(XArray *xa, VgFile *fp)
 {
    // header
-   VG_(fprintf) (fp, "%12s %8s %8s\n", "t", "WSS_insn", "WSS_data");
+   VG_(fprintf) (fp, "%12s %8s %8s %4s", "t", "WSS_insn", "WSS_data", "peak");
+   #ifdef DEBUG
+   VG_(fprintf) (fp, " %12s %12s", "mAvg", "mVar");
+   #endif
+   VG_(fprintf) (fp, "\n");
 
    // data points
    const int num_t = VG_(sizeXA)(ws_at_time);
    unsigned long peak_i = 0, peak_d = 0;
-   unsigned long long sum_i = 0, sum_d = 0;
+   unsigned long long sum_i = 0, sum_d = 0, n_peaks = 0;
    for (int i = 0; i < num_t; i++) {
       WorkingSet **ws = VG_(indexXA)(ws_at_time, i);
       const unsigned long t = (unsigned long)(*ws)->t;
@@ -815,7 +1009,20 @@ static void print_ws_over_time(XArray *xa, VgFile *fp)
       sum_d += pd;
       if (pi > peak_i) peak_i = pi;
       if (pd > peak_d) peak_d = pd;
-      VG_(fprintf) (fp, "%12lu %8lu %8lu\n", t, pi, pd);
+
+      char peak;
+      if ((*ws)->stackid >= 0) {
+         peak = '*';
+         n_peaks++;
+      } else {
+         peak = '_';
+      }
+      VG_(fprintf) (fp, "%12lu %8lu %8lu    %c", t, pi, pd, peak);
+      #ifdef DEBUG
+         VG_(fprintf) (fp, " %10.1f %10.1f", (*ws)->mAvg, (*ws)->mVar);
+      #endif
+      VG_(fprintf) (fp, "\n");
+
    }
 
    const long unsigned int total_i = (long unsigned int) VG_(HT_count_nodes) (ht_insn);
@@ -832,6 +1039,7 @@ static void print_ws_over_time(XArray *xa, VgFile *fp)
                  (unsigned int)((avg_d * clo_pagesize) / 1024.f),
                  (unsigned int)((peak_d * clo_pagesize) / 1024.f),
                  (unsigned int)((total_d * clo_pagesize) / 1024.f));
+   return n_peaks;
 }
 
 static void ws_fini(Int exitcode)
@@ -875,6 +1083,11 @@ static void ws_fini(Int exitcode)
       VG_(fprintf) (fp, "Time Unit:      %s\n", TimeUnit_to_string(clo_time_unit));
       VG_(fprintf) (fp, "Every:          %'d units\n", clo_every);
       VG_(fprintf) (fp, "Tau:            %'d units\n\n", clo_tau);
+      if (clo_peak) {
+         VG_(fprintf) (fp, "Peak window:    %'d\n", clo_peakwindow);
+         VG_(fprintf) (fp, "Peak threshold: %d\n", clo_peakthresh);
+         VG_(fprintf) (fp, "Peak influence: %.1f\n", clo_peakinfl);
+      }
       VG_(fprintf) (fp, "--\n\n");
 
       // page listing
@@ -888,7 +1101,8 @@ static void ws_fini(Int exitcode)
 
       // working set data
       VG_(fprintf) (fp, "Working sets:\n");
-      print_ws_over_time (ws_at_time, fp);
+      const unsigned long long npk = print_ws_over_time (ws_at_time, fp);
+      VG_(umsg)("Number of peaks: %llu\n", npk);
       VG_(fprintf) (fp, "\n--\n");
    }
 
