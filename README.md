@@ -21,13 +21,15 @@ This tool is in early development, and might not do what you may expect. Please 
 
 ## Compiling
 ### Prerequisites
-Valgrind 3.13 -- 3.14. Other versions are untested.
+Valgrind 3.14. Other versions are untested.
 
 ### Build Process
  1. Clone this repository into your valgrind sources, such that it resides in the same directory as `lackey`. In the following, we assume the new directory is called `ws`.
- 2. Edit valgrind's `Makefile.am`, adding the new directory `ws` to the `TOOLS` variable
- 3. Edit `configure.ac`, adding `ws/Makefile` to the `AC_CONFIG_FILES` list
- 4. Run
+ 2. some valgrind versions need a patch (to walk stack traces from ExeContext):
+   * valgrind 3.14: apply [this patch](https://bugsfiles.kde.org/attachment.cgi?id=115712)
+ 3. Edit valgrind's `Makefile.am`, adding the new directory `ws` to the `TOOLS` variable
+ 4. Edit `configure.ac`, adding `ws/Makefile` to the `AC_CONFIG_FILES` list
+ 5. Run
 ```
 autogen.sh
 ./configure # possibly with other parameters
@@ -158,7 +160,7 @@ The avg/peak/total values are interpreted as follows:
  * `peak` is the maximum working set size over all `t`.
 
 ### Peak Detection
-With option `--ws-peak=yes`, the tool tries to detect sudden jumps in the working set sizes, and
+With option `--ws-peak-detect=yes`, the tool tries to detect sudden jumps in the working set sizes, and
 annotates those peaks with the current call stack. Since the peaks are references made in the past,
 we annotate the sample before the peak.
 
