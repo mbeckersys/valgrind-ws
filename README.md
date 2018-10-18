@@ -161,8 +161,45 @@ The avg/peak/total values are interpreted as follows:
 
 ### Peak Detection
 With option `--ws-peak-detect=yes`, the tool tries to detect sudden jumps in the working set sizes, and
-annotates those peaks with the current call stack. Since the peaks are references made in the past,
-we annotate the sample before the peak.
+annotates those peaks with the current call stack, to allow for further debugging.
+Towards this, the working set table is augmented with a column `peak`, which contains an ID number
+referencing further information about the peak:
+
+```
+...
+Working sets:
+           t WSS_insn WSS_data peak
+           0        0        0    -
+      100002       21       79    -
+           .        .        .    .
+           .        .        .    .
+           .        .        .    .
+    96101775        1        2    0
+           .        .        .    .
+           .        .        .    .
+           .        .        .    .
+   380931690       27       86    3
+
+Insn avg/peak/total:  1.1/104/182 pages (4/416/728 kB)
+Data avg/peak/total:  19.2/260/743 pages (76/1,040/2,972 kB)
+--
+```
+
+The references are elaborated below:
+```
+
+Peak info:
+[   0] refs=4, loc=stress-cpu.c:1262|stress-cpu.c:1267|stress-cpu.c:1267|stress-cpu.c:1267|stress-cpu.c:1267|stress-cpu.c:1267|stress-cpu.c:1267|stress-cpu.c:1267|stress-cpu.c:1267|stress-cpu.c:1267|stress-cpu.c:1267|stress-cpu.c:126
+...
+[   3] refs=1, loc=
+```
+In this example, it means that the call stack with ID=0 was encountered at four different peaks (e.g.,
+at t=96101775, see table above), and the source location is given as a string thereafter
+("stress-cpu.c:1262" called "stress-cpu.c:1267" ...).
+
+Furthermore, this example demonstrates a special case: the process produced a peak during exit
+(the last sample is always taken at exit), with reference ID=3. However, at process exit, we no
+longer have any location info, thus `loc` is empty.
 
 #### Interpretation of the example
 In this example, it can be seen that the workload initially requires around hundred instruction pages,
