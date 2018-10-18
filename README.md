@@ -201,8 +201,24 @@ Furthermore, this example demonstrates a special case: the process produced a pe
 (the last sample is always taken at exit), with reference ID=3. However, at process exit, we no
 longer have any location info, thus `loc` is empty.
 
-#### Interpretation of the example
-In this example, it can be seen that the workload initially requires around hundred instruction pages,
+#### Detection Parameters
+We use a moving average/variance computation with z-score comparison. A peak is detected if the current sample deviates
+more than `thresh` * `window variance` from the moving average, which is equivalent to the z-score. Parameters are:
+ * `--ws-peak-window`: length of the moving window in units of `--ws-every`
+ * `--ws-peak-thresh`: selects `thresh`
+
+Additionally, every time a peak is detected, the signal is exponentially filtered, that is, since
+the current working set size is currently peaky, we do not fully include it into the window statistics,
+but only with exponential dampening. The gain parameter is currently not available via the command line.
+
+Tuning tips:
+ * larger windows assume more stationary behavior, and take longer to track
+ * higher thresholds require bigger jumps before a peak is detected
+
+TODO: expose debug interface to ease tuning
+
+### Interpretation of the example
+In the example above, it can be seen that the workload initially requires around hundred instruction pages,
 which however decreases to an average of 1.4 pages later on (this is not surprising, since this particular
 workload -- stress-ng -- is designed to consume as little memory as possible when stationary).
 The peak working set size for instructions is at the program initialization, and about half of the
@@ -228,10 +244,11 @@ much less than the total amount of memory shown by other tools, e.g., by the `ti
 To generate a plot of the working set, you may use the Python script `valgrind-ws-plot.py` in the
 folder tools. It uses matplotlib to generate an interactive plot. Example:
 ```
-./valgrind-ws-plot.py --yscale=symlog ../tests/data/ws.out.6775
+./valgrind-ws-plot.py --yscale=symlog ../tests/data/ws.peak.out
 ```
 gives
-![Alt text](/tests/data/ws.out.6775.png?raw=true "Plot")
+![Alt text](/tests/data/ws.peak.out.png?raw=true "Plot")
 
-The y-axis is in units of pages. The plot can also be exported to a file with
+The y-axis is in units of pages. The green annotations mark peaks, if `--ws-peak-detect=yes` is used,
+and the numbers are the IDs of the call stacks. The plot can also be exported to a file with
 command line option `--output=myfile.png`

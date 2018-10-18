@@ -26,6 +26,7 @@ def plot_all(stats, info, args):
     ind = [d['t'] for d in stats]
     wssi = [d['wssi'] for d in stats]
     wssd = [d['wssd'] for d in stats]
+    peaks = {d['t']: d['peak'] for d in stats if d['peak'] is not None}
 
     fig = plt.figure(figsize=(10, 5))
     ax = fig.add_subplot('111')
@@ -46,20 +47,29 @@ def plot_all(stats, info, args):
     if args.yscale is not None:
         ax.set_yscale(args.yscale)
 
+    tau = info.get('Tau', 0)
+    if tau:
+        ax.plot([0, tau], [0, 0], 'm', marker='v')
+        leg += ['$\\tau$ length']
+
+    # annotate peak info
+    peak_color = 'green'
+    for t, pkid in peaks.iteritems():
+        plt.axvline(x=t, color='green', linestyle='dotted')
+        ax.annotate('{}'.format(pkid),
+                    xy=(t, 0), xycoords='data',
+                    bbox=dict(boxstyle="round", fc="0.8", color=peak_color),
+                    color=peak_color, xytext=(0, -20), textcoords='offset points')
+
     # axes and title
     ax.set_ylabel('working set size [pages]')
     tunit = info.get('Time Unit', '')
     ax.set_xlabel('time [{}]'.format(tunit) if tunit else 'time')
-    tau = info.get('Tau', 0)
     cmd = info.get('Command', '')
     strtau = "with $\\tau$={:,}".format(tau) if tau != 0 else ''
     strcmd = "of '{}'".format(cmd) if cmd else ''
     title = "Working set size {} {}".format(strcmd, strtau) if args.title is None else args.title
     ax.set_title(title)
-
-    if tau:
-        ax.plot([0, tau], [0, 0], 'm', marker='v')
-        leg += ['$\\tau$ length']
 
     # decoration
     ax.grid()
@@ -87,38 +97,69 @@ def parse_file(fname):
         return None
 
     l = 0
+    hdr = True
     state = 'preamble'
-    rex = re.compile(r"^[\s\t]*(\d+)[\s\t]+(\d+)[\s\t]+(\d+)[\s\t]+$")
+    rex_nopeak = re.compile(r"^[\s\t]*(\d+)[\s\t]+(\d+)[\s\t]+(\d+)$")
+    rex_peak = re.compile(r"^[\s\t]*(\d+)[\s\t]+(\d+)[\s\t]+(\d+)[\s\t]+(.*)$")
     with open(fname, 'r') as f:
         for line in f:
             l += 1
+
+            if '--' == line.strip():
+                state = 'search'
+                log.debug("section end")
+                continue
+
+            if state == 'search':
+                if re.match(r"^Working sets:", line):
+                    state = "wset"
+                    hdr = True
+                    log.info("Found WS data in line {}".format(l))
+                    continue
+
+                if re.match(r"Peak info", line):
+                    state = "peakinfo"
+                    log.info("Found peak info in line {}".format(l))
+                    continue
 
             if state == "preamble":
                 m = re.match(r"([^:]+):[\s\t]*(.*)$", line)
                 if m:
                     k = m.group(1)
                     v = m.group(2)
-                    if k in ('Tau', 'Every', 'Instructions', 'Page size'):
+                    if k in ('Tau', 'Every', 'Instructions', 'Page size', 'Peak window'):
                         v = human_number_to_int(v.split(' ')[0])
                     info[k] = v
                     log.debug("Preamble: {}={}".format(k, v))
-                if re.match(r'--', line):
-                    state = 'search'
-
-            if state == 'search' and re.match(r"^Working sets:", line):
-                state = "wset"
-                log.info("Found WS data in line {}".format(l))
 
             if state == "wset":
-                m = rex.match(line)
+                if hdr:
+                    hdr = False
+                    wset_header = re.findall(r"\w+", line)
+                    log.debug("working set header: {}".format(wset_header))
+                else:
+                    parts = re.findall(r"[^\s\t]+", line)
+                    if len(parts) == len(wset_header):
+                        t = int(parts[wset_header.index('t')])
+                        wssi = int(parts[wset_header.index('WSS_insn')])
+                        wssd = int(parts[wset_header.index('WSS_data')])
+                        try:
+                            peak = int(parts[wset_header.index('peak')])
+                        except (IndexError, ValueError):
+                            peak = None
+                        ret.append(dict(t=t, wssi=wssi, wssd=wssd, peak=peak))
+                        log.debug("wset point: t={}, i={}, d={}, pk={}".format(t, wssi, wssd, peak))
+
+            if state == "peakinfo":
+                m = re.match(r"\[\s+(\d+)\] refs=(\d+), loc=(.*)$", line)
                 if m:
-                    t = int(m.group(1))
-                    wssi = int(m.group(2))
-                    wssd = int(m.group(3))
-                    ret.append(dict(t=t, wssi=wssi, wssd=wssd))
-                    log.debug("wset point: t={}, i={}, d={}".format(t, wssi, wssd))
-                if re.match(r'--', line):
-                    state = 'search'
+                    if 'peaks' not in info: info['peaks'] = {}
+                    pkid = int(m.group(1))
+                    refs = int(m.group(2))
+                    loc = m.group(3)
+                    info['peaks'][pkid] = dict(refs=refs, loc=loc)
+                    log.info("Peak [{}]: refs={}, loc={}".format(pkid, refs, loc))
+
     # --
     log.info("Parsed {} lines, found {} data points".format(l, len(ret)))
     return ret, info
