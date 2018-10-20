@@ -159,16 +159,22 @@ The avg/peak/total values are interpreted as follows:
  * `total` is the working set size over the entire life time of the process, i.e., t=tau=inf.
  * `peak` is the maximum working set size over all `t`.
 
-### Peak Detection
-With option `--ws-peak-detect=yes`, the tool tries to detect sudden jumps in the working set sizes, and
-annotates those peaks with the current call stack, to allow for further debugging.
-Towards this, the working set table is augmented with a column `peak`, which contains an ID number
-referencing further information about the peak:
+### Additional Information for Samples
+Additional information, such as the current call stack, can be collected for some samples. Currently,
+there are two ways to determine for which samples detailed information is recorded:
+ 1. at user-defined points in time. Use command line argument `--ws-info-at`
+ 2. automatically, when peaksin the working set size are detected. Use command line argument `--ws-peak-detect=yes`. More information about peak detection is given below
+
+#### Peak Detection
+With option `--ws-peak-detect=yes`, the tool tries to detect sudden jumps in the working set sizes,
+and records additional sample information to allow for further debugging.
+Towards this, the working set table is augmented with a column `info`, which contains an ID number
+referencing further information about the sample:
 
 ```
 ...
 Working sets:
-           t WSS_insn WSS_data peak
+           t WSS_insn WSS_data info
            0        0        0    -
       100002       21       79    -
            .        .        .    .
@@ -188,7 +194,7 @@ Data avg/peak/total:  19.2/260/743 pages (76/1,040/2,972 kB)
 The references are elaborated below:
 ```
 
-Peak info:
+Sample info:
 [   0] refs=4, loc=stress-cpu.c:1262|stress-cpu.c:1267|stress-cpu.c:1267|stress-cpu.c:1267|stress-cpu.c:1267|stress-cpu.c:1267|stress-cpu.c:1267|stress-cpu.c:1267|stress-cpu.c:1267|stress-cpu.c:1267|stress-cpu.c:1267|stress-cpu.c:126
 ...
 [   3] refs=1, loc=
@@ -201,7 +207,7 @@ Furthermore, this example demonstrates a special case: the process produced a pe
 (the last sample is always taken at exit), with reference ID=3. However, at process exit, we no
 longer have any location info, thus `loc` is empty.
 
-#### Detection Parameters
+##### Detection Parameters
 We use a moving average/variance computation with z-score comparison. A peak is detected if the current sample deviates
 more than `thresh` * `window variance` from the moving average, which is equivalent to the z-score. Parameters are:
  * `--ws-peak-window`: length of the moving window in units of `--ws-every`

@@ -26,7 +26,7 @@ def plot_all(stats, info, args):
     ind = [d['t'] for d in stats]
     wssi = [d['wssi'] for d in stats]
     wssd = [d['wssd'] for d in stats]
-    peaks = {d['t']: d['peak'] for d in stats if d['peak'] is not None}
+    peaks = {d['t']: d['info'] for d in stats if d['info'] is not None}
 
     fig = plt.figure(figsize=(10, 5))
     ax = fig.add_subplot('111')
@@ -52,14 +52,14 @@ def plot_all(stats, info, args):
         ax.plot([0, tau], [0, 0], 'm', marker='v')
         leg += ['$\\tau$ length']
 
-    # annotate peak info
-    peak_color = 'green'
+    # annotate sample info
+    info_color = 'green'
     for t, pkid in peaks.iteritems():
-        plt.axvline(x=t, color='green', linestyle='dotted')
+        plt.axvline(x=t, color=info_color, linestyle='dotted')
         ax.annotate('{}'.format(pkid),
                     xy=(t, 0), xycoords='data',
-                    bbox=dict(boxstyle="round", fc="0.8", color=peak_color),
-                    color=peak_color, xytext=(0, -20), textcoords='offset points')
+                    bbox=dict(boxstyle="round", fc="0.8", color=info_color),
+                    color=info_color, xytext=(0, -20), textcoords='offset points')
 
     # axes and title
     ax.set_ylabel('working set size [pages]')
@@ -99,8 +99,6 @@ def parse_file(fname):
     l = 0
     hdr = True
     state = 'preamble'
-    rex_nopeak = re.compile(r"^[\s\t]*(\d+)[\s\t]+(\d+)[\s\t]+(\d+)$")
-    rex_peak = re.compile(r"^[\s\t]*(\d+)[\s\t]+(\d+)[\s\t]+(\d+)[\s\t]+(.*)$")
     with open(fname, 'r') as f:
         for line in f:
             l += 1
@@ -117,9 +115,9 @@ def parse_file(fname):
                     log.info("Found WS data in line {}".format(l))
                     continue
 
-                if re.match(r"Peak info", line):
-                    state = "peakinfo"
-                    log.info("Found peak info in line {}".format(l))
+                if re.match(r"Sample info", line):
+                    state = "sampleinfo"
+                    log.info("Found sample info in line {}".format(l))
                     continue
 
             if state == "preamble":
@@ -144,21 +142,21 @@ def parse_file(fname):
                         wssi = int(parts[wset_header.index('WSS_insn')])
                         wssd = int(parts[wset_header.index('WSS_data')])
                         try:
-                            peak = int(parts[wset_header.index('peak')])
+                            sinf = int(parts[wset_header.index('info')])
                         except (IndexError, ValueError):
-                            peak = None
-                        ret.append(dict(t=t, wssi=wssi, wssd=wssd, peak=peak))
-                        log.debug("wset point: t={}, i={}, d={}, pk={}".format(t, wssi, wssd, peak))
+                            sinf = None
+                        ret.append(dict(t=t, wssi=wssi, wssd=wssd, info=sinf))
+                        log.debug("wset point: t={}, i={}, d={}, pk={}".format(t, wssi, wssd, sinf))
 
-            if state == "peakinfo":
+            if state == "sampleinfo":
                 m = re.match(r"\[\s+(\d+)\] refs=(\d+), loc=(.*)$", line)
                 if m:
-                    if 'peaks' not in info: info['peaks'] = {}
+                    if 'sampleinfo' not in info: info['sampleinfo'] = {}
                     pkid = int(m.group(1))
                     refs = int(m.group(2))
                     loc = m.group(3)
-                    info['peaks'][pkid] = dict(refs=refs, loc=loc)
-                    log.info("Peak [{}]: refs={}, loc={}".format(pkid, refs, loc))
+                    info['sampleinfo'][pkid] = dict(refs=refs, loc=loc)
+                    log.info("Sample info [{}]: refs={}, loc={}".format(pkid, refs, loc))
 
     # --
     log.info("Parsed {} lines, found {} data points".format(l, len(ret)))

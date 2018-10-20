@@ -10,7 +10,7 @@ import re
 
 lag = 100  # moving window length
 threshold = 10  # peak is detected if data point is that many variances away from mean
-influence = .5  # how much peaks change thresholds. 0=none/robust, 1=fast/reactive
+influence = 1  # how much peaks change thresholds. 0=none/robust, 1=fast/reactive
 typefilt = 'exp'  # exp=exponential (lower memory footprint, less accurate), window=explicit
 assert lag >= 1
 
@@ -48,8 +48,7 @@ def peak_detect(y):
         return var
 
     is_peak = abs(y - pd_data['movingAvg']) > threshold * pd_data['movingVar']
-    # 'movingVar'])
-    if pd_data['k'] > 0 and is_peak:
+    if pd_data['k'] >= lag and is_peak:
         # peak: check direction and filter
         pk = 1 if y > pd_data['movingAvg'] else -1
         if pd_data['k'] >= lag:
@@ -60,6 +59,10 @@ def peak_detect(y):
         pk = 0
         filtered = y
 
+    # only for plotting:
+    dbg_avg[dbg_idx] = pd_data['movingAvg']
+    dbg_var[dbg_idx] = pd_data['movingVar']
+
     # update peak detector data
     if typefilt == 'window': pd_data['window'].append(filtered)  # ring buffer for SMA
     update_var(filtered)  # must come before avg!!!
@@ -69,8 +72,6 @@ def peak_detect(y):
 
     # only for plotting
     dbg_filt[dbg_idx] = filtered
-    dbg_avg[dbg_idx] = pd_data['movingAvg']
-    dbg_var[dbg_idx] = pd_data['movingVar']
     return pk
 
 
@@ -83,9 +84,10 @@ if len(sys.argv) > 1:
     stream = []
     with open(datafile, 'r') as f:
         for line in f:
-            m = re.search(r"(\d+)[\s\t]+(\d+)[\s\t]+(\d+)", line)
-            if m:
-                stream.append(int(m.group(3)))  # 2=insn, 3=data
+            parts = re.findall(r"[^\s\t]+", line)
+            if len(parts) > 2:
+                stream.append(int(parts[2]))  # 2=insn, 3=data
+
     stream = np.array(stream)
 else:
     # data stream
@@ -121,19 +123,20 @@ for i in range(0, len(stream)):
     pre = signals[i]
 print "Peaks: {}".format(pk)
 
-dbg_std = np.sqrt(dbg_var)
-
 # Plot result
 result = np.asarray(signals)
 ax1 = pylab.subplot(211)
 ax1.plot(np.arange(1, len(stream)+1), stream, color='k')
 ax1.plot(np.arange(1, len(stream)+1), dbg_filt, color='red', lw=1)
-ax1.plot(np.arange(1, len(stream)+1), dbg_avg, color="cyan", lw=2)
-ax1.plot(np.arange(1, len(stream)+1), dbg_avg + threshold * dbg_std, color="green", lw=2)
-ax1.plot(np.arange(1, len(stream)+1), dbg_avg - threshold * dbg_std, color="green", lw=2)
+ax1.plot(np.arange(1, len(stream)+1), dbg_avg, color="blue", lw=2)
+ax1.fill_between(np.arange(1, len(stream)+1),
+                 dbg_avg - threshold * dbg_var, dbg_avg + threshold * dbg_var,
+                 color="gray", alpha=.2)
 ax1.grid()
-pylab.legend(['signal', 'filtered', 'avg', 'thresh', 'thresh'])
+pylab.legend(['signal', 'filtered', 'avg', 'thresh'])
 pylab.title("mode={}".format(typefilt))
+# pylab.ylim(0, 100)
+ax1.set_yscale('symlog')
 
 pylab.subplot(212, sharex=ax1)
 pylab.step(np.arange(1, len(stream)+1), result, color="red", lw=2)

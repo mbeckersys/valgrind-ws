@@ -55,18 +55,9 @@
 
 #if defined(__VALGRIND_MAJOR__) && defined(__VALGRIND_MINOR__) \
     && (__VALGRIND_MAJOR__ >= 3 && __VALGRIND_MINOR__ >= 14)
-   #define WS_EPOCH 1
+   // all okay
 #else
-   #undef WS_EPOCH
    #error "This valgrind version is too old"
-#endif
-
-#ifdef WS_EPOCH
-   #define EPOCH_ARG_NOCOMMA(x) x
-   #define EPOCH_ARG(x) EPOCH_ARG_NOCOMMA(x),
-#else
-   #define EPOCH_ARG_NOCOMMA(x) /* nix */
-   #define EPOCH_ARG(x) EPOCH_ARG_NOCOMMA(x)
 #endif
 
 /*------------------------------------------------------------*/
@@ -93,9 +84,7 @@ struct map_pageaddr
   VgHashNode        top;  // page address, must be first
   unsigned long int count;
   Time              last_access;
-  #ifdef WS_EPOCH
-  DiEpoch           ep;
-  #endif
+  DiEpoch           ep;  // FIXME: for dbg info; actually only required for INSN, not for DATA
 };
 
 #define vgPlain_malloc(size) vgPlain_malloc ((const char *) __func__, size)
@@ -138,7 +127,7 @@ typedef
    WorkingSet;
 
 /**
- * @brief details for a WSS peak
+ * @brief details for a single working set sample
  */
 typedef
    struct {
@@ -146,27 +135,26 @@ typedef
       unsigned int  cnt;
       HChar        *callstack;
    }
-   PeakInfo;
+   SampleInfo;
 
 /**
- * @brief element in hash table ExeContext -> PeakInfo.
+ * @brief element in hash table ExeContext -> SampleInfo.
  */
-struct map_peakinfo
+struct map_context2sampleinfo
 {
   VgHashNode top;   // ExeContext ECU, must be first
-  PeakInfo   info;
+  SampleInfo info;
 };
 
-
 /**
- * @brief element in list of WSS peaks
+ * @brief element in list ws_context_list
  */
 typedef
    struct {
       Time        t;
       ExeContext *ec;
    }
-   WorkingSetPeak;
+   SampleContext;
 
 
 /**
@@ -200,19 +188,22 @@ static void maybe_compute_ws (void);
 
 static Bool postmortem = False;  ///< certain actions we cannot do after process terminated
 static Long guest_instrs_executed = 0;
-static unsigned long num_samples = 0;
-static unsigned long drop_samples = 0;
 
 // page access tables
 static VgHashTable *ht_data;
 static VgHashTable *ht_insn;
-static VgHashTable *ht_ec2peakinfo;
+static VgHashTable *ht_ec2sampleinfo;
+
+// list of user-defined points in time where sample info shall be recorded
+static XArray *ws_info_times;
+static int     next_user_time_idx = -1;
 
 // working set at each point in time
 static XArray *ws_at_time;
+static unsigned long drop_samples = 0;
 
-// peak detect results
-static XArray *ws_peak_list;
+// list of sample contexts; on termination converted to SampleInfo
+static XArray *ws_context_list;
 
 /* Up to this many unnotified events are allowed.  Must be at least two,
    so that reads and writes to the same address can be merged into a modify.
@@ -277,13 +268,13 @@ static Int   clo_pagesize   = WS_DEFAULT_PS;
 static Int   clo_every      = WS_DEFAULT_EVERY;
 static Int   clo_tau        = 0;
 static Int   clo_time_unit  = TimeI;
-//static Int   clo_stackdepth = 30;
 
 /* The name of the function of which the number of calls (under
  * --basic-counts=yes) is to be counted, with default. Override with command
  * line option --fnname. */
 static const HChar* clo_fnname = "main";
 static const HChar* clo_filename = "ws.out.%p";
+static const HChar* clo_info_at = "";
 static HChar* int_filename;
 
 static Bool ws_process_cmd_line_option(const HChar* arg)
@@ -291,6 +282,7 @@ static Bool ws_process_cmd_line_option(const HChar* arg)
    if VG_BOOL_CLO(arg, "--ws-locations", clo_locations) {}
    else if VG_BOOL_CLO(arg, "--ws-list-pages", clo_listpages) {}
    else if VG_STR_CLO(arg, "--ws-file", clo_filename) {}
+   else if VG_STR_CLO(arg, "--ws-info-at", clo_info_at) {}
    else if VG_INT_CLO(arg, "--ws-pagesize", clo_pagesize) {}
    else if VG_INT_CLO(arg, "--ws-every", clo_every) {}
    else if VG_INT_CLO(arg, "--ws-tau", clo_tau) { tl_assert(clo_tau > 0); }
@@ -311,16 +303,17 @@ static Bool ws_process_cmd_line_option(const HChar* arg)
 static void ws_print_usage(void)
 {
    VG_(printf)(
-"    --ws-file=<string>        file name to write results\n"
-"    --ws-list-pages=no|yes    print list of all accessed pages [no]\n"
-"    --ws-locations=no|yes     collect location info for insn pages in listing [yes]\n"
-"    --ws-peak-detect=no|yes   collect info for peaks in working set [no]\n"
-"    --ws-peak-window=<int>    window length (in samples) for peak detection [%d]\n"
-"    --ws-peak-thresh=<int>    threshold in multiples of variance for peaks [%d]\n"
-"    --ws-pagesize=<int>       size of VM pages in bytes [%d]\n"
-"    --ws-time-unit=i|ms       time unit: instructions executed (default), milliseconds\n"
-"    --ws-every=<int>          sample WS every <int> time units [%d]\n"
-"    --ws-tau=<int>            consider all accesses made in the last tau time units [%d]\n",
+"    --ws-file=<string>            file name to write results\n"
+"    --ws-list-pages=no|yes        print list of all accessed pages [no]\n"
+"    --ws-locations=no|yes         collect location info for insn pages in listing [yes]\n"
+"    --ws-peak-detect=no|yes       collect info for peaks in working set [no]\n"
+"    --ws-peak-window=<int>        window length (in samples) for peak detection [%d]\n"
+"    --ws-peak-thresh=<int>        threshold in multiples of variance for peaks [%d]\n"
+"    --ws-info-at=<int>(,<int>)*   list of points in time where additional information shall be recorded\n"
+"    --ws-pagesize=<int>           size of VM pages in bytes [%d]\n"
+"    --ws-time-unit=i|ms           time unit: instructions executed (default), milliseconds\n"
+"    --ws-every=<int>              sample working set every <int> time units [%d]\n"
+"    --ws-tau=<int>                consider all accesses made in the last tau time units [%d]\n",
    WS_DEFAULT_PEAKW,
    WS_DEFAULT_PEAKT,
    WS_DEFAULT_PS,
@@ -441,9 +434,7 @@ static void pageaccess(Addr pageaddr, VgHashTable *ht) {
 
    page->count++;
    page->last_access = (long) get_time();
-   #ifdef WS_EPOCH
    page->ep = VG_(current_DiEpoch)();
-   #endif
 
    maybe_compute_ws();
 }
@@ -595,10 +586,16 @@ void addEvent_Dw ( IRSB* sb, IRAtom* daddr, Int dsize )
    events_used++;
 }
 
-
-/*------------------------------------------------------------*/
-/*--- Basic tool functions                                 ---*/
-/*------------------------------------------------------------*/
+/**
+ * @brief sort Time
+ */
+static Int
+time_compare (const Time **t1, const Time **t2)
+{
+   if (((long)**t1) > ((long)**t2)) return 1;
+   if (((long)**t1) < ((long)**t2)) return -1;
+   return 0;
+}
 
 static void ws_post_clo_init(void)
 {
@@ -616,6 +613,48 @@ static void ws_post_clo_init(void)
       VG_(umsg)("Warning: time unit %s not implemented, yet. Fallback to instructions",
                 TimeUnit_to_string(clo_time_unit));
       clo_time_unit = TimeI;
+   }
+
+   // user list of times for sample info
+   {
+      // parse
+      const HChar *pt = clo_info_at;
+      UInt num;
+      while (VG_(parse_UInt) (&pt, &num)) {
+         Time *it = VG_(malloc) (sizeof(Time));
+         if (it) {
+            *it = (Time)num;
+            VG_(addToXA) (ws_info_times, &it);
+         }
+         while (*pt == ',' || *pt == ' ') pt++;
+      }
+      // sort and un-dupe
+      VG_(setCmpFnXA) (ws_info_times, (XACmpFn_t) time_compare);
+      VG_(sortXA) (ws_info_times);
+      int num_t = VG_(sizeXA) (ws_info_times);
+      Time pre;
+      for (int i = 0; i < num_t; /* in loop*/) {
+         Time **cur = VG_(indexXA)(ws_info_times, i);
+         if (i > 0 && pre == **cur) {
+            pre = **cur;
+            VG_(removeIndexXA) (ws_info_times, i);
+            num_t--;
+         } else {
+            pre = **cur;
+            ++i;
+         }
+      }
+      // summarize
+      num_t = VG_(sizeXA) (ws_info_times);
+      if (num_t > 0) {
+         next_user_time_idx = 0;
+         VG_(umsg) ("Recording info at user times: ");
+         for (int i = 0; i < num_t; i++) {
+            Time **t = VG_(indexXA)(ws_info_times, i);
+            VG_(umsg) ("%ld ", (long)**t);
+         }
+         VG_(umsg) ("\n");
+      }
    }
 
    // peak filters
@@ -689,12 +728,12 @@ typedef
  * * XXX: do not change this function without according changes in strstack_maxlen()
  */
 static void strstack_make
-(UInt n, EPOCH_ARG(DiEpoch ep) Addr ip, void* uu_opaque)
+(UInt n, DiEpoch ep, Addr ip, void* uu_opaque)
 {
    callstack_string *cs = (callstack_string*) uu_opaque;
 
    // inlining
-   InlIPCursor *iipc = VG_(new_IIPC)(EPOCH_ARG(ep) ip);
+   InlIPCursor *iipc = VG_(new_IIPC)(ep, ip);
    do {
       const HChar *fname;
       UInt         line;
@@ -716,12 +755,12 @@ static void strstack_make
  * XXX: do not change this function without according changes in strstack_make()
  */
 static void strstack_maxlen
-(UInt n, EPOCH_ARG(DiEpoch ep) Addr ip, void* uu_opaque)
+(UInt n, DiEpoch ep, Addr ip, void* uu_opaque)
 {
    callstack_string *cs = (callstack_string*) uu_opaque;
 
    // inlining
-   InlIPCursor *iipc = VG_(new_IIPC)(EPOCH_ARG(ep) ip);
+   InlIPCursor *iipc = VG_(new_IIPC)(ep, ip);
    do {
       const HChar *fname;
       UInt         line;
@@ -759,61 +798,75 @@ static HChar* get_callstack(ExeContext *ec) {
    return cs.str;
 }
 
-#if 0
-static const HChar* get_current_callstack(void) {
-   Addr*ips = (Addr*) VG_(malloc) (sizeof(Addr)*clo_stackdepth);
-
-   // After this call, the IPs we want are in ips[0]..ips[n_ips-1].
-   Int n_ips = VG_(get_StackTrace)(VG_(get_running_tid)(),
-                                   ips, clo_stackdepth,
-                                   NULL /*array to dump SP values in*/,
-                                   NULL /*array to dump FP values in*/,
-                                   0 /*first_ip_delta*/);
-
-   DiEpoch ep = VG_(current_DiEpoch)();
-
-   ExeContext* ec = VG_(make_ExeContext_from_StackTrace)(ips, n_ips);
-   const HChar *str = get_callstack(ips, ep, n_ips);
-   //VG_(free) (ips); assuming ec now owns the ptr.
-   return str;
+/**
+ * @brief record additional information about process right now
+ */
+static
+void record_sample_info(Time now_time)
+{
+   SampleContext *wsp = VG_(malloc) (sizeof(*wsp));
+   if (wsp) {
+      wsp->t = now_time;
+      if (!postmortem) {
+         wsp->ec = VG_(record_ExeContext)(VG_(get_running_tid)(), 0);
+      } else {
+         wsp->ec = VG_(null_ExeContext)();
+      }
+      VG_(addToXA) (ws_context_list, &wsp);
+   }
 }
-#endif
 
 static
 void compute_ws(Time now_time)
 {
+   /*********
+    * WSS
+    *********/
    WorkingSet *ws = VG_(malloc) (sizeof(WorkingSet));
    if (!ws) {
       drop_samples++;
       return;
    }
-
    ws->t = now_time;
    ws->pages_insn = recently_used_pages (ht_insn, now_time);
    ws->pages_data = recently_used_pages (ht_data, now_time);
-   num_samples++;
+   VG_(addToXA) (ws_at_time, &ws);
+
+   /*********
+    * INFO
+    *********/
+   Bool have_info = False;
+
+   if (next_user_time_idx >= 0) {
+      Time **nextt= VG_(indexXA) (ws_info_times, next_user_time_idx);
+      if (now_time >= **nextt) {
+         record_sample_info (now_time);
+         have_info = True;
+         // go to next one that is in the future (they might be too dense for --ws-every)
+         do {
+            if (next_user_time_idx < VG_(sizeXA)(ws_info_times) - 1) {
+               next_user_time_idx++;
+            } else {
+               next_user_time_idx = -1;
+            }
+            if (next_user_time_idx < 0) break;
+            nextt = VG_(indexXA) (ws_info_times, next_user_time_idx);
+         } while (**nextt < now_time);
+      }
+   }
 
    if (clo_peakdetect) {
+      // both peak detect have to run every sample for uniformity, thus no short-circuit eval
+      const Bool pk_data = peak_detect(&pd_data, ws->pages_data);
+      const Bool pk_insn = peak_detect(&pd_insn, ws->pages_insn);
+      if (!have_info && (pk_data || pk_insn)) {
+         record_sample_info (now_time);
+      }
       #ifdef DEBUG
          ws->mAvg = pd_data.movingAvg;
          ws->mVar = pd_data.movingVar;
       #endif
-      if (peak_detect(&pd_data, ws->pages_data) || peak_detect(&pd_insn, ws->pages_insn)) {
-         WorkingSetPeak *wsp = VG_(malloc) (sizeof(*wsp));
-         if (wsp) {
-            wsp->t = now_time;
-            if (!postmortem) {
-               wsp->ec = VG_(record_ExeContext)(VG_(get_running_tid)(), 0);
-            } else {
-               wsp->ec = VG_(null_ExeContext)();
-            }
-            VG_(addToXA) (ws_peak_list, &wsp);
-         }
-         //VG_(umsg) ("WSS peak (insn=%lu, data=%lu) at: \n", ws->pages_insn, ws->pages_data);
-      }
    }
-
-   VG_(addToXA) (ws_at_time, &ws);
 }
 
 static
@@ -1030,13 +1083,13 @@ map_pageaddr_compare (const void *p1, const void *p2)
 }
 
 /**
- * @brief sort peakinfo by id
+ * @brief sort SampleInfo by id
  */
 static Int
-map_peakinfo_compare (const void *p1, const void *p2)
+map_context2sampleinfo_compare (const void *p1, const void *p2)
 {
-   const struct map_peakinfo * const *a1 = (const struct map_peakinfo * const *) p1;
-   const struct map_peakinfo * const *a2 = (const struct map_peakinfo * const *) p2;
+   const struct map_context2sampleinfo * const *a1 = (const struct map_context2sampleinfo * const *) p1;
+   const struct map_context2sampleinfo * const *a2 = (const struct map_context2sampleinfo * const *) p2;
 
    if ((*a1)->info.id > (*a2)->info.id) return 1;
    if ((*a1)->info.id < (*a2)->info.id) return -1;
@@ -1068,11 +1121,7 @@ static void print_pagestats(VgHashTable *ht, VgFile *fp)
                     (void*)res[i]->top.key,
                     res[i]->last_access);
       if (ht == ht_insn && clo_locations) {
-         #ifdef WS_EPOCH
          const HChar *where = VG_(describe_IP) (res[i]->ep, res[i]->top.key, NULL);
-         #else
-         const HChar *where = VG_(describe_IP) (res[i]->top.key, NULL);
-         #endif
          VG_(fprintf) (fp, " %s", where);
       }
    }
@@ -1080,44 +1129,45 @@ static void print_pagestats(VgHashTable *ht, VgFile *fp)
    VG_(free) (res);
 }
 
-static void print_ws_peak_info(VgHashTable *ht, VgFile *fp) {
+static void print_sample_info(VgHashTable *ht, VgFile *fp) {
 
    int nres = 0;
    int nentry = VG_(HT_count_nodes) (ht);
    // sort
-   struct map_peakinfo **res;
+   struct map_context2sampleinfo **res;
    res = VG_(malloc) (nentry * sizeof (*res));  // ptr to ptr
    VG_(HT_ResetIter)(ht);
    VgHashNode *nd;
    while ((nd = VG_(HT_Next)(ht)))
-      res[nres++] = (struct map_peakinfo *) nd;
-   VG_(ssort) (res, nres, sizeof (res[0]), map_peakinfo_compare);
+      res[nres++] = (struct map_context2sampleinfo *) nd;
+   VG_(ssort) (res, nres, sizeof (res[0]), map_context2sampleinfo_compare);
 
    // print sorted
    for (int i = 0; i < nres; ++i) {
-      struct map_peakinfo *pi = (struct map_peakinfo*) res[i];
+      struct map_context2sampleinfo *pi = (struct map_context2sampleinfo*) res[i];
       VG_(fprintf) (fp, "[%4d] refs=%u, loc=%s\n", pi->info.id, pi->info.cnt, pi->info.callstack);
    }
    VG_(free) (res);
 }
 
-static void print_ws_over_time(XArray *xa, VgHashTable *peakinfo, VgFile *fp)
+static void print_ws_over_time(XArray *xa, VgHashTable *ht_sampleinfo, VgFile *fp)
 {
    // header
    VG_(fprintf) (fp, "%12s %8s %8s", "t", "WSS_insn", "WSS_data");
+   if (VG_(HT_count_nodes) (ht_sampleinfo) > 0) {
+      VG_(fprintf) (fp, " info");
+   }
    if (clo_peakdetect) {
-      VG_(fprintf) (fp, " peak");
       #ifdef DEBUG
          VG_(fprintf) (fp, " %12s %12s", "mAvg", "mVar");
       #endif
    }
-
    VG_(fprintf) (fp, "\n");
 
-   // peak info
-   const int n_peaks = VG_(sizeXA)(ws_peak_list);
-   int peak_id = 0;
-   WorkingSetPeak **next_peak = (n_peaks > 0) ? VG_(indexXA)(ws_peak_list, peak_id++) : NULL;
+   // sample info
+   const int n_info = VG_(sizeXA)(ws_context_list);
+   int info_id = 0;
+   SampleContext **next_info = (n_info > 0) ? VG_(indexXA)(ws_context_list, info_id++) : NULL;
 
    // data points
    const int num_t = VG_(sizeXA)(xa);
@@ -1135,20 +1185,25 @@ static void print_ws_over_time(XArray *xa, VgHashTable *peakinfo, VgFile *fp)
       if (pi > peak_i) peak_i = pi;
       if (pd > peak_d) peak_d = pd;
 
-      VG_(fprintf) (fp, "%12lu %8lu %8lu", t, pi, pd);
-      if (clo_peakdetect) {
-         char strpeak[5];
-         if (next_peak && (*next_peak)->t == t) {
-            // this sample was classified as peak; lookup peak info
-            const UInt ecid = VG_(get_ECU_from_ExeContext)((*next_peak)->ec);
-            struct map_peakinfo *pki = VG_(HT_lookup) (ht_ec2peakinfo, ecid);
+      // sample info, if present
+      if (VG_(HT_count_nodes) (ht_sampleinfo) > 0) {
+         char strinfo[5];
+         if (next_info && (*next_info)->t == t) {
+            const UInt ecid = VG_(get_ECU_from_ExeContext)((*next_info)->ec);
+            struct map_context2sampleinfo *pki = VG_(HT_lookup) (ht_ec2sampleinfo, ecid);
             tl_assert(pki != NULL);
-            VG_(snprintf) (strpeak, sizeof(strpeak), "%d", pki->info.id);
-            next_peak = (peak_id < n_peaks) ? VG_(indexXA)(ws_peak_list, peak_id++) : NULL;
+            VG_(snprintf) (strinfo, sizeof(strinfo), "%d", pki->info.id);
+            next_info = (info_id < n_info) ? VG_(indexXA)(ws_context_list, info_id++) : NULL;
          } else {
-            VG_(snprintf) (strpeak, sizeof(strpeak), "-");
+            VG_(snprintf) (strinfo, sizeof(strinfo), "-");
          }
-         VG_(fprintf) (fp, " %4s", strpeak);
+         VG_(fprintf) (fp, "%12lu %8lu %8lu %4s", t, pi, pd, strinfo);
+
+      } else {
+         VG_(fprintf) (fp, "%12lu %8lu %8lu", t, pi, pd);
+      }
+
+      if (clo_peakdetect) {
          #ifdef DEBUG
             VG_(fprintf) (fp, " %10.1f %10.1f", (*ws)->mAvg, (*ws)->mVar);
          #endif
@@ -1173,39 +1228,37 @@ static void print_ws_over_time(XArray *xa, VgHashTable *peakinfo, VgFile *fp)
 }
 
 /**
- * @brief go over list of peaks and determine peak info (callstack)
- * @return number of unique peaks
+ * @brief go over list of sample info and make list of unique info
+ * @return number of unique information
  */
 static unsigned long
-compute_peakinfo(XArray *xa) {
+compute_sample_info(XArray *xa) {
    unsigned long num_unique = 0;
 
    const int num_t = VG_(sizeXA)(xa);
    for (int i = 0; i < num_t; i++) {
-      WorkingSetPeak **wsp = VG_(indexXA)(xa, i);
+      SampleContext **wsp = VG_(indexXA)(xa, i);
       const UInt ecid = VG_(get_ECU_from_ExeContext)((*wsp)->ec);
-      struct map_peakinfo *pi = VG_(HT_lookup) (ht_ec2peakinfo, ecid);
+      struct map_context2sampleinfo *pi = VG_(HT_lookup) (ht_ec2sampleinfo, ecid);
       if (pi == NULL) {
          num_unique++;
          HChar *strcs = get_callstack((*wsp)->ec);
          pi = VG_(malloc) (sizeof(*pi));
          pi->top.key = ecid;
-         pi->info.id = VG_(HT_count_nodes)(ht_ec2peakinfo);
+         pi->info.id = VG_(HT_count_nodes)(ht_ec2sampleinfo);
          pi->info.callstack = strcs;
          pi->info.cnt = 1;
-         //VG_(umsg)("peak [%u] @%s\n", pi->info.id, pi->info.callstack);
-         VG_(HT_add_node) (ht_ec2peakinfo, (VgHashNode *) pi);
+         VG_(HT_add_node) (ht_ec2sampleinfo, (VgHashNode *) pi);
 
       } else {
          pi->info.cnt++;
-         //VG_(umsg)("peak [%d] visited %u times\n", pi->info.id, pi->info.cnt);
       }
    }
    return num_unique;
 }
 
-static void free_peakinfo(void *arg) {
-   struct map_peakinfo *pi = (struct map_peakinfo*) arg;
+static void free_sample_info(void *arg) {
+   struct map_context2sampleinfo *pi = (struct map_context2sampleinfo*) arg;
    VG_(free) (pi->info.callstack);
    VG_(free) (arg);
 }
@@ -1220,8 +1273,8 @@ static void ws_fini(Int exitcode)
    tl_assert(clo_fnname[0]);
 
    VG_(umsg)("Number of instructions: %'lu\n", (unsigned long) guest_instrs_executed);
-   VG_(umsg)("Number of WS samples:   %'lu\n", num_samples);
-   VG_(umsg)("Dropped WS samples:     %'lu\n", drop_samples);
+   VG_(umsg)("Number of samples:      %'lu\n", VG_(sizeXA) (ws_at_time));
+   VG_(umsg)("Dropped samples:        %'lu\n", drop_samples);
 
    HChar* outfile = VG_(expand_file_name)("--ws-file", int_filename);
    VG_(umsg)("Writing results to file '%s'\n", outfile);
@@ -1268,22 +1321,21 @@ static void ws_fini(Int exitcode)
          VG_(fprintf) (fp, "\n--\n\n");
       }
 
-      unsigned long upk = 0;
-      if (clo_peakdetect) {
-         upk = compute_peakinfo(ws_peak_list);
-         VG_(umsg)("Number of peaks/unique: %lu/%lu\n", VG_(sizeXA)(ws_peak_list), upk);
-      }
+      // compute sample info
+      const unsigned long ninfo = compute_sample_info(ws_context_list);
+      VG_(umsg)("Number of info/unique: %lu/%lu\n", VG_(sizeXA)(ws_context_list), ninfo);
 
       // working set data
       VG_(fprintf) (fp, "Working sets:\n");
-      print_ws_over_time (ws_at_time, ht_ec2peakinfo, fp);
+      print_ws_over_time (ws_at_time, ht_ec2sampleinfo, fp);
       VG_(fprintf) (fp, "\n--\n\n");
 
-      if (clo_peakdetect) {
-         VG_(fprintf) (fp, "Peak info:\n");
-         print_ws_peak_info (ht_ec2peakinfo, fp);
+      // show sample info.
+      if (VG_(HT_count_nodes) (ht_ec2sampleinfo) > 0) {
+         VG_(fprintf) (fp, "Sample info:\n");
+         print_sample_info (ht_ec2sampleinfo, fp);
          VG_(fprintf) (fp, "\n");
-         VG_(fprintf) (fp, "Number of peaks/unique: %lu/%lu", VG_(sizeXA)(ws_peak_list), upk);
+         VG_(fprintf) (fp, "Number of info/unique: %lu/%lu", VG_(sizeXA)(ws_context_list), ninfo);
          VG_(fprintf) (fp, "\n--\n\n");
       }
    }
@@ -1292,9 +1344,10 @@ static void ws_fini(Int exitcode)
    VG_(fclose)(fp);
    VG_(HT_destruct) (ht_data, VG_(free));
    VG_(HT_destruct) (ht_insn, VG_(free));
-   VG_(HT_destruct) (ht_ec2peakinfo, free_peakinfo);
+   VG_(HT_destruct) (ht_ec2sampleinfo, free_sample_info);
    VG_(deleteXA) (ws_at_time);
-   VG_(deleteXA) (ws_peak_list);
+   VG_(deleteXA) (ws_context_list);
+   VG_(deleteXA) (ws_info_times);
    if (int_filename != clo_filename) VG_(free) ((void*)int_filename);
    VG_(umsg)("ws finished\n");
 }
@@ -1307,7 +1360,7 @@ static void ws_pre_clo_init(void)
    VG_(details_description)     (WS_DESC);
    VG_(details_copyright_author)("Copyright (C) 2018, and GNU GPL'd, by Martin Becker.");
    VG_(details_bug_reports_to)  (VG_BUGS_TO);
-   VG_(details_avg_translation_sizeB) ( 200 );
+   VG_(details_avg_translation_sizeB) (200);
 
    VG_(basic_tool_funcs)          (ws_post_clo_init,
                                    ws_instrument,
@@ -1316,11 +1369,12 @@ static void ws_pre_clo_init(void)
                                    ws_print_usage,
                                    ws_print_debug_usage);
 
-   ht_data        = VG_(HT_construct) ("ht_data");
-   ht_insn        = VG_(HT_construct) ("ht_insn");
-   ht_ec2peakinfo = VG_(HT_construct) ("ht_ec2peakinfo");
-   ws_at_time     = VG_(newXA) (VG_(malloc), "arr_ws",   VG_(free), sizeof(WorkingSet*));
-   ws_peak_list   = VG_(newXA) (VG_(malloc), "arr_peak", VG_(free), sizeof(WorkingSetPeak*));
+   ht_data          = VG_(HT_construct) ("ht_data");
+   ht_insn          = VG_(HT_construct) ("ht_insn");
+   ht_ec2sampleinfo = VG_(HT_construct) ("ht_ec2sampleinfo");
+   ws_at_time       = VG_(newXA) (VG_(malloc), "arr_ws",   VG_(free), sizeof(WorkingSet*));
+   ws_context_list  = VG_(newXA) (VG_(malloc), "arr_info", VG_(free), sizeof(SampleContext*));
+   ws_info_times    = VG_(newXA) (VG_(malloc), "arr_time", VG_(free), sizeof(Time*));
 }
 
 VG_DETERMINE_INTERFACE_VERSION(ws_pre_clo_init)
