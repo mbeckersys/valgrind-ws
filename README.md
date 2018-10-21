@@ -165,7 +165,7 @@ there are two ways to determine for which samples detailed information is record
  1. at user-defined points in time. Use command line argument `--ws-info-at`
  2. automatically, when peaksin the working set size are detected. Use command line argument `--ws-peak-detect=yes`. More information about peak detection is given below
 
-#### Peak Detection
+#### Peak Detection (experimental)
 With option `--ws-peak-detect=yes`, the tool tries to detect sudden jumps in the working set sizes,
 and records additional sample information to allow for further debugging.
 Towards this, the working set table is augmented with a column `info`, which contains an ID number
@@ -208,10 +208,12 @@ Furthermore, this example demonstrates a special case: the process produced a pe
 longer have any location info, thus `loc` is empty.
 
 ##### Detection Parameters
-We use a moving average/variance computation with z-score comparison. A peak is detected if the current sample deviates
-more than `thresh` * `window variance` from the moving average, which is equivalent to the z-score. Parameters are:
- * `--ws-peak-window`: length of the moving window in units of `--ws-every`
- * `--ws-peak-thresh`: selects `thresh`
+We use a moving average/variance and compare the dispersion of new samples towards the current
+average. A peak is detected if the current sample deviates more than a certain threshold, multiplied
+by `--ws-peak-thresh`. The threshold itself depends on the local memory characteristics: If the
+ratio variance over peak is high, then the threshold is defined by how many "variances" the new
+ sample deviates from the average. If it is low, then it is defined by how much in comparison to
+ the average it deviates from the average. In between, both factors are considered.
 
 Additionally, every time a peak is detected, the signal is exponentially filtered, that is, since
 the current working set size is currently peaky, we do not fully include it into the window statistics,
@@ -221,7 +223,7 @@ Tuning tips:
  * larger windows assume more stationary behavior, and take longer to track
  * higher thresholds require bigger jumps before a peak is detected
 
-TODO: expose debug interface to ease tuning
+The accompanying Python script can be used to experiment with values.
 
 ### Interpretation of the example
 In the example above, it can be seen that the workload initially requires around hundred instruction pages,

@@ -121,7 +121,7 @@ typedef
       pagecount pages_data;
       //int       stackid;    ///< if peak-detect is on and this wset is a peak, then this is the ID of the according call stack
    #ifdef DEBUG
-      float     mAvg, mVar;
+      Float     mAvg, mVar;
    #endif
    }
    WorkingSet;
@@ -165,14 +165,14 @@ typedef
       // states
       unsigned  k;
       short int peak_pre;
-      float     filt_pre;
-      float     movingAvg;
-      float     movingVar;
+      Float     filt_pre;
+      Float     movingAvg;
+      Float     movingVar;
       // params
       unsigned  window;
-      float     thresh;     ///< min. z-score to be counted as peak
-      float     influence;  ///< coefficient for filtering out peaks
-      float     exp_alpha;  ///< coefficient for exponential moving filters
+      Float     threshgain;
+      Float     adaptrate;  ///< coefficient for filtering out peaks
+      Float     exp_alpha;  ///< coefficient for exponential moving filters
    }
    PeakDetect;
 
@@ -253,17 +253,17 @@ PeakDetect   pd_data, pd_insn;
 #define WS_DEFAULT_PS 4096
 #define WS_DEFAULT_EVERY 100000
 #define WS_DEFAULT_TAU WS_DEFAULT_EVERY
-#define WS_DEFAULT_PEAKT 3
+#define WS_DEFAULT_PEAKT 5
 #define WS_DEFAULT_PEAKW 30
-#define WS_DEFAULT_PEAKINFL 0.5f ///< default value for peak filter
+#define WS_DEFAULT_PEAKADP 0.25f ///< default value for peak filter. lower=more robust to bursts
 
 // user inputs:
 static Bool  clo_locations  = True;
 static Bool  clo_listpages  = False;
 static Bool  clo_peakdetect = False;
-static Int   clo_peakthresh = WS_DEFAULT_PEAKT;  // FIXME: float?
+static Int   clo_peakthresh = WS_DEFAULT_PEAKT;  // FIXME: Float?
 static Int   clo_peakwindow = WS_DEFAULT_PEAKW;
-static Float clo_peakinfl   = WS_DEFAULT_PEAKINFL;  // FIXME: from clo
+static Float clo_peakadapt  = WS_DEFAULT_PEAKADP;  // FIXME: from clo
 static Int   clo_pagesize   = WS_DEFAULT_PS;
 static Int   clo_every      = WS_DEFAULT_EVERY;
 static Int   clo_tau        = 0;
@@ -308,7 +308,7 @@ static void ws_print_usage(void)
 "    --ws-locations=no|yes         collect location info for insn pages in listing [yes]\n"
 "    --ws-peak-detect=no|yes       collect info for peaks in working set [no]\n"
 "    --ws-peak-window=<int>        window length (in samples) for peak detection [%d]\n"
-"    --ws-peak-thresh=<int>        threshold in multiples of variance for peaks [%d]\n"
+"    --ws-peak-thresh=<int>        threshold for peaks. Lower is more sensitive [%d]\n"
 "    --ws-info-at=<int>(,<int>)*   list of points in time where additional information shall be recorded\n"
 "    --ws-pagesize=<int>           size of VM pages in bytes [%d]\n"
 "    --ws-time-unit=i|ms           time unit: instructions executed (default), milliseconds\n"
@@ -347,25 +347,57 @@ static void init_peakd(PeakDetect *pd) {
 
    pd->window = clo_peakwindow;
    pd->exp_alpha = 2.f / (clo_peakwindow + 1);
-   pd->influence = (float) clo_peakinfl;
-   pd->thresh = (float) clo_peakthresh;
+   pd->adaptrate = (Float) clo_peakadapt;
+   pd->threshgain = (Float) clo_peakthresh;
 }
 
+
+static inline Float exp_approx(Float x) {
+  x = 1.0 + x / 256.0;
+  x *= x; x *= x; x *= x; x *= x;
+  x *= x; x *= x; x *= x; x *= x;
+  return x;
+}
+
+/**
+ * @brief detects peaks in working set size
+ * Implements a moving average (avg) and a moving variance (var) filter.
+ * Window length is given by --ws-peak-window.
+ * Peak is detected if signal properties change such that a certain
+ * metric becomes higher than a threshold.
+ *
+ * The Fano factor F (var/avg) is used to decide how peaks are detected:
+ *  - high F: compare changes to current ver
+ *  - low F: compare changes to current avg
+ *  - in between: smooth transition between both
+ *
+ * Additionally, the signal is exponentially filtered iff peaks are detected,
+ * before it is taken into the moving windows. Full filtering (1.0) means
+ * the signal is assumed stationary, and thresholds do not react to peaks. Vice
+ * versa, 0.0 suppresses filtering, taking signal into account as it is.
+ */
 static Bool peak_detect(PeakDetect *pd, pagecount y) {
    short int pk = 0;
-   float filt = (float) y;
+   Float filt = (Float) y;
 
    // detect peaks and filter them
-   float y0 = y - pd->movingAvg;
-   const Bool is_peak = FABS(y0) > (pd->thresh * pd->movingVar);
+   Float coeff = 1.0;
+   if (pd->movingAvg > 0.f) {
+      const Float fano = pd->movingVar / pd->movingAvg;
+      coeff = 1.0 - exp_approx(-fano / 2.);  // fano = 1.0 -> 60% weight to variance
+   }
+   const Float thresh = coeff * pd->threshgain * pd->movingVar +
+                        (1.f - coeff) * pd->threshgain/10. * pd->movingAvg;
+   Float y0 = y - pd->movingAvg;
+   const Bool is_peak = FABS(y0) > thresh;
    if (pd->k >= pd->window && is_peak) {
       pk = (y > pd->movingAvg) ? 1 : -1;
-      filt = pd->influence * y + (1 - pd->influence) * pd->filt_pre;
+      filt = pd->adaptrate * y + (1 - pd->adaptrate) * pd->filt_pre;
    }
 
    // moving variance (must be calc'd first)
    if (0 < pd->k) {
-      const float diff = ((float) filt) - pd->movingAvg;  // XXX: important, previous average.
+      const Float diff = ((Float) filt) - pd->movingAvg;  // XXX: important, previous average.
       pd->movingVar = (1.f - pd->exp_alpha) * (pd->movingVar + pd->exp_alpha * diff * diff);
    } else {
       pd->movingVar = 0.f;
@@ -375,7 +407,7 @@ static Bool peak_detect(PeakDetect *pd, pagecount y) {
    if (0 < pd->k) {
       pd->movingAvg = pd->exp_alpha * filt + (1.f - pd->exp_alpha) * pd->movingAvg;
    } else {
-      pd->movingAvg = (float) filt;
+      pd->movingAvg = (Float) filt;
    }
 
    if (pd->k < pd->window) pd->k++;
@@ -1213,8 +1245,8 @@ static void print_ws_over_time(XArray *xa, VgHashTable *ht_sampleinfo, VgFile *f
 
    const long unsigned int total_i = (long unsigned int) VG_(HT_count_nodes) (ht_insn);
    const long unsigned int total_d = (long unsigned int) VG_(HT_count_nodes) (ht_data);
-   const float avg_i = ((float)sum_i) / (num_t - 1);
-   const float avg_d = ((float)sum_d) / (num_t - 1);
+   const Float avg_i = ((Float)sum_i) / (num_t - 1);
+   const Float avg_d = ((Float)sum_d) / (num_t - 1);
    VG_(fprintf) (fp, "\nInsn avg/peak/total:  %'.1f/%'lu/%'lu pages (%'u/%'u/%'u kB)",
                  avg_i, peak_i, total_i,
                  (unsigned int)((avg_i * clo_pagesize) / 1024.f),
@@ -1308,7 +1340,7 @@ static void ws_fini(Int exitcode)
       if (clo_peakdetect) {
          VG_(fprintf) (fp, "Peak window:    %'d\n", clo_peakwindow);
          VG_(fprintf) (fp, "Peak threshold: %d\n", clo_peakthresh);
-         VG_(fprintf) (fp, "Peak influence: %.1f\n", clo_peakinfl);
+         VG_(fprintf) (fp, "Peak adaptrate: %.1f\n", clo_peakadapt);
       }
       VG_(fprintf) (fp, "--\n\n");
 
