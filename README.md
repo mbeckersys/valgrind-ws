@@ -195,13 +195,13 @@ The references are elaborated below:
 ```
 
 Sample info:
-[   0] refs=4, loc=stress-cpu.c:1262|stress-cpu.c:1267|stress-cpu.c:1267|stress-cpu.c:1267|stress-cpu.c:1267|stress-cpu.c:1267|stress-cpu.c:1267|stress-cpu.c:1267|stress-cpu.c:1267|stress-cpu.c:1267|stress-cpu.c:1267|stress-cpu.c:126
+[   0] refs=4, loc=stress-cpu.c:1262|stress-cpu.c:1267|stress-cpu.c:1267|stress-cpu.c:1267|...
 ...
 [   3] refs=1, loc=
 ```
 In this example, it means that the call stack with ID=0 was encountered at four different peaks (e.g.,
 at t=96101775, see table above), and the source location is given as a string thereafter
-("stress-cpu.c:1262" called "stress-cpu.c:1267" ...).
+("stress-cpu.c:1262" called by "stress-cpu.c:1267" ...).
 
 Furthermore, this example demonstrates a special case: the process produced a peak during exit
 (the last sample is always taken at exit), with reference ID=3. However, at process exit, we no

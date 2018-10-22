@@ -79,7 +79,7 @@ struct map_pageaddr
   VgHashNode        top;  // page address, must be first
   unsigned long int count;
   Time              last_access;
-  DiEpoch           ep;
+  DiEpoch           ep;  // FIXME: opt: we do not use debug info for data pages, remove ep for data?
 };
 
 #define vgPlain_malloc(size) vgPlain_malloc ((const char *) __func__, size)
@@ -111,7 +111,7 @@ typedef
 
 typedef
    struct {
-      Time t;
+      Time t; // FIXME: opt: we could store only the delta to the intended point in time.
       pagecount pages_insn;
       pagecount pages_data;
    #ifdef DEBUG
@@ -793,14 +793,12 @@ void strstack_make
       UInt         line;
       if (VG_(get_filename_linenum)(ep, ip, &fname, NULL, &line)) {
          // format: "%s:%u"
-         VG_(strcat) (cs->str, fname);
-         VG_(strcat) (cs->str, ":");
-         cs->rem -= VG_(strlen) (fname) + 1;
-         cs->rem -= VG_(snprintf) (cs->str + VG_(strlen) (cs->str), cs->rem-1, "%u", line);
+         VG_(strncat) (cs->str, fname, cs->rem); cs->rem -= VG_(strlen)(fname);
+         VG_(strncat) (cs->str, ":", cs->rem); cs->rem -= 1;
+         cs->rem -= VG_(snprintf) (cs->str + VG_(strlen) (cs->str), cs->rem, "%u", line);
       }
       // separator
-      VG_(strcat) (cs->str, "|");
-      cs->rem -= 1;
+      VG_(strncat) (cs->str, "|", cs->rem); cs->rem -= 1;
    } while (VG_(next_IIPC)(iipc));
 }
 
@@ -843,7 +841,8 @@ HChar* get_callstack(ExeContext *ec)
    cs.rem = 0;
    VG_(apply_ExeContext) (strstack_maxlen, (void*)&cs, ep, ec);
 
-   cs.str = (HChar*) VG_(malloc) ((cs.rem + 1) * sizeof(HChar));
+   cs.rem += 1; // better than sorry
+   cs.str = (HChar*) VG_(malloc) (cs.rem * sizeof(HChar));
    cs.str[0] = 0;
 
    // assemble string
@@ -863,7 +862,8 @@ void record_sample_info(Time now_time)
    if (wsp) {
       wsp->t = now_time;
       if (!postmortem) {
-         wsp->ec = VG_(record_ExeContext)(VG_(get_running_tid)(), 0);
+         ThreadId tid = VG_(get_running_tid)();
+         wsp->ec = VG_(record_ExeContext)(tid, 0);
       } else {
          wsp->ec = VG_(null_ExeContext)();
       }
