@@ -35,7 +35,7 @@
 #include "pub_tool_libcfile.h"
 #include "pub_tool_libcproc.h"
 #include "pub_tool_options.h"
-#include "pub_tool_machine.h"     // VG_(fnptr_to_fnentry)
+#include "pub_tool_machine.h"      // VG_(fnptr_to_fnentry)
 #include "pub_tool_clientstate.h"  // args + exe name
 #include "pub_tool_hashtable.h"
 #include "pub_tool_mallocfree.h"
@@ -64,14 +64,9 @@
 /*--- tool info                                            ---*/
 /*------------------------------------------------------------*/
 
-#define WS_NAME "ws"
-#define WS_VERSION "0.1"
-#define WS_DESC "compute working set for data and instructions"
-
-/*------------------------------------------------------------*/
-/*--- macros                                               ---*/
-/*------------------------------------------------------------*/
-#define FABS(x) ((x < 0.f) ? -x : x)
+#define WS_NAME    "ws"
+#define WS_VERSION "0.3"
+#define WS_DESC    "compute working set for data and instructions"
 
 /*------------------------------------------------------------*/
 /*--- type definitions                                     ---*/
@@ -84,7 +79,7 @@ struct map_pageaddr
   VgHashNode        top;  // page address, must be first
   unsigned long int count;
   Time              last_access;
-  DiEpoch           ep;  // FIXME: for dbg info; actually only required for INSN, not for DATA
+  DiEpoch           ep;
 };
 
 #define vgPlain_malloc(size) vgPlain_malloc ((const char *) __func__, size)
@@ -99,7 +94,7 @@ typedef
 
 typedef enum { OpLoad=0, OpStore=1, OpAlu=2 } Op;
 
-#define MAX_DSIZE    512
+#define MAX_DSIZE 512
 
 typedef
    enum { Event_Ir, Event_Dr, Event_Dw, Event_Dm }
@@ -119,7 +114,6 @@ typedef
       Time t;
       pagecount pages_insn;
       pagecount pages_data;
-      //int       stackid;    ///< if peak-detect is on and this wset is a peak, then this is the ID of the according call stack
    #ifdef DEBUG
       Float     mAvg, mVar;
    #endif
@@ -156,7 +150,6 @@ typedef
    }
    SampleContext;
 
-
 /**
  * @brief internal data of peak detector
  */
@@ -175,6 +168,13 @@ typedef
       Float     exp_alpha;  ///< coefficient for exponential moving filters
    }
    PeakDetect;
+
+typedef
+   struct {
+      HChar *str;
+      int    rem;
+   }
+   callstack_string;
 
 /*------------------------------------------------------------*/
 /*--- prototypes                                           ---*/
@@ -199,8 +199,8 @@ static XArray *ws_info_times;
 static int     next_user_time_idx = -1;
 
 // working set at each point in time
-static XArray *ws_at_time;
-static unsigned long drop_samples = 0;
+static XArray        *ws_at_time;
+static unsigned long  drop_samples = 0;
 
 // list of sample contexts; on termination converted to SampleInfo
 static XArray *ws_context_list;
@@ -277,7 +277,26 @@ static const HChar* clo_filename = "ws.out.%p";
 static const HChar* clo_info_at = "";
 static HChar* int_filename;
 
-static Bool ws_process_cmd_line_option(const HChar* arg)
+/*------------------------------------------------------------*/
+/*--- libc replacements                                    ---*/
+/*------------------------------------------------------------*/
+#define FABS(x) ((x < 0.f) ? -x : x)
+
+static inline
+Float exp_approx(Float x)
+{
+  x = 1.0 + x / 256.0;
+  x *= x; x *= x; x *= x; x *= x;
+  x *= x; x *= x; x *= x; x *= x;
+  return x;
+}
+
+/*------------------------------------------------------------*/
+/*--- all other functions                                  ---*/
+/*------------------------------------------------------------*/
+
+static
+Bool ws_process_cmd_line_option(const HChar* arg)
 {
    if VG_BOOL_CLO(arg, "--ws-locations", clo_locations) {}
    else if VG_BOOL_CLO(arg, "--ws-list-pages", clo_listpages) {}
@@ -300,7 +319,8 @@ static Bool ws_process_cmd_line_option(const HChar* arg)
    return True;
 }
 
-static void ws_print_usage(void)
+static
+void ws_print_usage(void)
 {
    VG_(printf)(
 "    --ws-file=<string>            file name to write results\n"
@@ -322,14 +342,16 @@ static void ws_print_usage(void)
    );
 }
 
-static void ws_print_debug_usage(void)
+static
+void ws_print_debug_usage(void)
 {
    VG_(printf)(
 "    (none)\n"
    );
 }
 
-static const HChar* TimeUnit_to_string(TimeUnit time_unit)
+static
+const HChar* TimeUnit_to_string(TimeUnit time_unit)
 {
    switch (time_unit) {
    case TimeI:  return "instructions";
@@ -338,7 +360,9 @@ static const HChar* TimeUnit_to_string(TimeUnit time_unit)
    }
 }
 
-static void init_peakd(PeakDetect *pd) {
+static
+void init_peakd(PeakDetect *pd)
+{
    pd->filt_pre = 0.f;
    pd->peak_pre = 0;
    pd->k = 0;
@@ -349,14 +373,6 @@ static void init_peakd(PeakDetect *pd) {
    pd->exp_alpha = 2.f / (clo_peakwindow + 1);
    pd->adaptrate = (Float) clo_peakadapt;
    pd->threshgain = (Float) clo_peakthresh;
-}
-
-
-static inline Float exp_approx(Float x) {
-  x = 1.0 + x / 256.0;
-  x *= x; x *= x; x *= x; x *= x;
-  x *= x; x *= x; x *= x; x *= x;
-  return x;
 }
 
 /**
@@ -376,7 +392,9 @@ static inline Float exp_approx(Float x) {
  * the signal is assumed stationary, and thresholds do not react to peaks. Vice
  * versa, 0.0 suppresses filtering, taking signal into account as it is.
  */
-static Bool peak_detect(PeakDetect *pd, pagecount y) {
+static
+Bool peak_detect(PeakDetect *pd, pagecount y)
+{
    short int pk = 0;
    Float filt = (Float) y;
 
@@ -418,9 +436,12 @@ static Bool peak_detect(PeakDetect *pd, pagecount y) {
    return ret;
 }
 
-static Time get_time(void)
+/**
+ * @brief Get current time, in whatever time unit we're using.
+ */
+static
+Time get_time(void)
 {
-   // Get current time, in whatever time unit we're using.
    if (clo_time_unit == TimeI) {
       return guest_instrs_executed;
    } else if (clo_time_unit == TimeMS) {
@@ -447,14 +468,16 @@ static Time get_time(void)
    }
 }
 
-static inline Addr pageaddr(Addr addr)
+static
+inline Addr pageaddr(Addr addr)
 {
    return addr & ~(clo_pagesize-1);
 }
 
 // TODO: pages shared between processes?
-static void pageaccess(Addr pageaddr, VgHashTable *ht) {
-
+static
+void pageaccess(Addr pageaddr, VgHashTable *ht)
+{
    struct map_pageaddr *page = VG_(HT_lookup) (ht, pageaddr);
    if (page == NULL) {
       page = VG_(malloc) (sizeof (*page));
@@ -463,7 +486,6 @@ static void pageaccess(Addr pageaddr, VgHashTable *ht) {
       VG_(HT_add_node) (ht, (VgHashNode *) page);
       //VG_(dmsg)("New page: %p\n", pageaddr);
    }
-
    page->count++;
    page->last_access = (long) get_time();
    page->ep = VG_(current_DiEpoch)();
@@ -471,19 +493,22 @@ static void pageaccess(Addr pageaddr, VgHashTable *ht) {
    maybe_compute_ws();
 }
 
-static VG_REGPARM(2) void trace_data(Addr addr, SizeT size)
+static
+VG_REGPARM(2) void trace_data(Addr addr, SizeT size)
 {
    const Addr pa = pageaddr(addr);
    pageaccess(pa, ht_data);
 }
 
-static VG_REGPARM(2) void trace_instr(Addr addr, SizeT size)
+static
+VG_REGPARM(2) void trace_instr(Addr addr, SizeT size)
 {
    const Addr pa = pageaddr(addr);
    pageaccess(pa, ht_insn);
 }
 
-static void flushEvents(IRSB* sb)
+static
+void flushEvents(IRSB* sb)
 {
    Int        i;
    const HChar* helperName;
@@ -523,7 +548,8 @@ static void flushEvents(IRSB* sb)
    events_used = 0;
 }
 
-static void addEvent_Ir ( IRSB* sb, IRAtom* iaddr, UInt isize )
+static
+void addEvent_Ir ( IRSB* sb, IRAtom* iaddr, UInt isize )
 {
    Event* evt;
    tl_assert( (VG_MIN_INSTR_SZB <= isize && isize <= VG_MAX_INSTR_SZB)
@@ -621,15 +647,16 @@ void addEvent_Dw ( IRSB* sb, IRAtom* daddr, Int dsize )
 /**
  * @brief sort Time
  */
-static Int
-time_compare (const Time **t1, const Time **t2)
+static
+Int time_compare (const Time **t1, const Time **t2)
 {
    if (((long)**t1) > ((long)**t2)) return 1;
    if (((long)**t1) < ((long)**t2)) return -1;
    return 0;
 }
 
-static void ws_post_clo_init(void)
+static
+void ws_post_clo_init(void)
 {
    // ensure we have a separate file for every process
    const HChar *append = ".%p";
@@ -701,7 +728,8 @@ static void ws_post_clo_init(void)
              TimeUnit_to_string(clo_time_unit));
 }
 
-static void add_counter_update(IRSB* sbOut, Int n)
+static
+void add_counter_update(IRSB* sbOut, Int n)
 {
    #if defined(VG_BIGENDIAN)
    # define END Iend_BE
@@ -748,18 +776,12 @@ unsigned long recently_used_pages(VgHashTable *ht, Time now_time)
    return cnt;
 }
 
-typedef
-   struct {
-      HChar *str;
-      int    rem;
-   }
-   callstack_string;
-
 /**
  * @brief actually assemble callstack string
  * * XXX: do not change this function without according changes in strstack_maxlen()
  */
-static void strstack_make
+static
+void strstack_make
 (UInt n, DiEpoch ep, Addr ip, void* uu_opaque)
 {
    callstack_string *cs = (callstack_string*) uu_opaque;
@@ -786,8 +808,8 @@ static void strstack_make
  * @brief determine max. length of callstack string
  * XXX: do not change this function without according changes in strstack_make()
  */
-static void strstack_maxlen
-(UInt n, DiEpoch ep, Addr ip, void* uu_opaque)
+static
+void strstack_maxlen(UInt n, DiEpoch ep, Addr ip, void* uu_opaque)
 {
    callstack_string *cs = (callstack_string*) uu_opaque;
 
@@ -811,9 +833,10 @@ static void strstack_maxlen
 /**
  * @brief get callstack as string
  */
-static HChar* get_callstack(ExeContext *ec) {
+static
+HChar* get_callstack(ExeContext *ec)
+{
    callstack_string cs;
-
    const DiEpoch ep = VG_(get_ExeContext_epoch) (ec);
 
    // pre-calculate length of string
@@ -1103,8 +1126,8 @@ IRSB* ws_instrument ( VgCallbackClosure* closure,
 /**
  * @brief sort page addr by ref count
  */
-static Int
-map_pageaddr_compare (const void *p1, const void *p2)
+static
+Int map_pageaddr_compare (const void *p1, const void *p2)
 {
    const struct map_pageaddr * const *a1 = (const struct map_pageaddr * const *) p1;
    const struct map_pageaddr * const *a2 = (const struct map_pageaddr * const *) p2;
@@ -1117,8 +1140,8 @@ map_pageaddr_compare (const void *p1, const void *p2)
 /**
  * @brief sort SampleInfo by id
  */
-static Int
-map_context2sampleinfo_compare (const void *p1, const void *p2)
+static
+Int map_context2sampleinfo_compare (const void *p1, const void *p2)
 {
    const struct map_context2sampleinfo * const *a1 = (const struct map_context2sampleinfo * const *) p1;
    const struct map_context2sampleinfo * const *a2 = (const struct map_context2sampleinfo * const *) p2;
@@ -1128,7 +1151,8 @@ map_context2sampleinfo_compare (const void *p1, const void *p2)
    return 0;
 }
 
-static void print_pagestats(VgHashTable *ht, VgFile *fp)
+static
+void print_pagestats(VgHashTable *ht, VgFile *fp)
 {
    int nentry = VG_(HT_count_nodes) (ht);
    VG_(fprintf) (fp, "%'d entries:\n", nentry);
@@ -1161,8 +1185,9 @@ static void print_pagestats(VgHashTable *ht, VgFile *fp)
    VG_(free) (res);
 }
 
-static void print_sample_info(VgHashTable *ht, VgFile *fp) {
-
+static
+void print_sample_info(VgHashTable *ht, VgFile *fp)
+{
    int nres = 0;
    int nentry = VG_(HT_count_nodes) (ht);
    // sort
@@ -1182,7 +1207,8 @@ static void print_sample_info(VgHashTable *ht, VgFile *fp) {
    VG_(free) (res);
 }
 
-static void print_ws_over_time(XArray *xa, VgHashTable *ht_sampleinfo, VgFile *fp)
+static
+void print_ws_over_time(XArray *xa, VgHashTable *ht_sampleinfo, VgFile *fp)
 {
    // header
    VG_(fprintf) (fp, "%12s %8s %8s", "t", "WSS_insn", "WSS_data");
@@ -1263,8 +1289,9 @@ static void print_ws_over_time(XArray *xa, VgHashTable *ht_sampleinfo, VgFile *f
  * @brief go over list of sample info and make list of unique info
  * @return number of unique information
  */
-static unsigned long
-compute_sample_info(XArray *xa) {
+static
+unsigned long compute_sample_info(XArray *xa)
+{
    unsigned long num_unique = 0;
 
    const int num_t = VG_(sizeXA)(xa);
@@ -1289,13 +1316,16 @@ compute_sample_info(XArray *xa) {
    return num_unique;
 }
 
-static void free_sample_info(void *arg) {
+static
+void free_sample_info(void *arg)
+{
    struct map_context2sampleinfo *pi = (struct map_context2sampleinfo*) arg;
    VG_(free) (pi->info.callstack);
    VG_(free) (arg);
 }
 
-static void ws_fini(Int exitcode)
+static
+void ws_fini(Int exitcode)
 {
    // force one last data point
    postmortem = True;
@@ -1384,8 +1414,8 @@ static void ws_fini(Int exitcode)
    VG_(umsg)("ws finished\n");
 }
 
-// DONE
-static void ws_pre_clo_init(void)
+static
+void ws_pre_clo_init(void)
 {
    VG_(details_name)            (WS_NAME);
    VG_(details_version)         (WS_VERSION);
