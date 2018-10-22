@@ -28,7 +28,12 @@ def plot_all(stats, info, args):
     wssd = [d['wssd'] for d in stats]
     peaks = {d['t']: d['info'] for d in stats if d['info'] is not None}
 
-    fig = plt.figure(figsize=(10, 5))
+    if args.figsize is not None:
+        parts = args.figsize.split(",")
+        figsize = (float(parts[0]), float(parts[1]))
+    else:
+        figsize = (10, 5)
+    fig = plt.figure(figsize=figsize)
     ax = fig.add_subplot('111')
     mid = ind[0] + (ind[-1] - ind[0]) / 2
 
@@ -188,6 +193,8 @@ def main(argv):
                         help='choose scaling for y axis')
     parser.add_argument('-o', '--outfile', default=None,
                         help='filename to save plot')
+    parser.add_argument('-s', '--figsize', default=None,
+                        help='plot dimensions, e.g., -s<w>,<h>')
     parser.add_argument('-t', '--title', default=None,
                         help='title of plot')
 

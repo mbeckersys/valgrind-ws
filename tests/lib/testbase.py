@@ -31,7 +31,7 @@ def get_outfile(stdout):
     return fname
 
 
-def analyze(stdout, func_check):
+def analyze(stdout, func_check, keep=False):
     """
     Call test-specific check and exit with common formatting.
 
@@ -39,7 +39,8 @@ def analyze(stdout, func_check):
     """
     fname = get_outfile(stdout)
     if func_check(fname):
-        os.remove(fname)
+        if not keep:
+            os.remove(fname)
         print "PASSED"
         exit(0)
     else:
