@@ -476,19 +476,28 @@ inline Addr pageaddr(Addr addr)
 
 // TODO: pages shared between processes?
 static
-void pageaccess(Addr pageaddr, VgHashTable *ht)
+inline void pageaccess(Addr pageaddr, VgHashTable *ht)
 {
-   struct map_pageaddr *page = VG_(HT_lookup) (ht, pageaddr);
-   if (page == NULL) {
-      page = VG_(malloc) (sizeof (*page));
-      page->top.key = pageaddr;
-      page->count = 0;
-      VG_(HT_add_node) (ht, (VgHashNode *) page);
-      //VG_(dmsg)("New page: %p\n", pageaddr);
+   // this is a one-item cache, exploiting locality and speeding up sim dramatically
+   static Addr                 lastaddr = 0;
+   static struct map_pageaddr *lastpage = NULL;
+   struct map_pageaddr        *page;
+   if (pageaddr == lastaddr) {
+      page = lastpage;
+   } else {
+      page = VG_(HT_lookup) (ht, pageaddr);
+      if (page == NULL) {
+         page = VG_(malloc) (sizeof (*page));
+         page->top.key = pageaddr;
+         page->count = 0;
+         page->ep = VG_(current_DiEpoch)();
+         VG_(HT_add_node) (ht, (VgHashNode *) page);
+      }
+      lastaddr = pageaddr;
+      lastpage = page;
    }
    page->count++;
    page->last_access = (long) get_time();
-   page->ep = VG_(current_DiEpoch)();
 
    maybe_compute_ws();
 }
@@ -534,7 +543,7 @@ void flushEvents(IRSB* sb)
             tl_assert(0);
       }
 
-      // Add the helper.
+      // Add the helper. FIXME: help the branch predictor here?
       argv = mkIRExprVec_2( ev->addr, mkIRExpr_HWord( ev->size ));
       di   = unsafeIRDirty_0_N( /*regparms*/2,
                                 helperName, VG_(fnptr_to_fnentry)( helperAddr ),
