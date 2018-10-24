@@ -65,7 +65,7 @@
 /*------------------------------------------------------------*/
 
 #define WS_NAME    "ws"
-#define WS_VERSION "0.3"
+#define WS_VERSION "0.4"
 #define WS_DESC    "compute working set for data and instructions"
 
 /*------------------------------------------------------------*/
@@ -272,7 +272,7 @@ static Int   clo_time_unit  = TimeI;
 /* The name of the function of which the number of calls (under
  * --basic-counts=yes) is to be counted, with default. Override with command
  * line option --fnname. */
-static const HChar* clo_fnname = "main";
+//static const HChar* clo_fnname = "main";
 static const HChar* clo_filename = "ws.out.%p";
 static const HChar* clo_info_at = "";
 static HChar* int_filename;
@@ -312,8 +312,8 @@ Bool ws_process_cmd_line_option(const HChar* arg)
    else if VG_INT_CLO(arg, "--ws-peak-thresh", clo_peakthresh) { tl_assert(clo_peakthresh > 0); }
    else return False;
 
-   tl_assert(clo_fnname);
-   tl_assert(clo_fnname[0]);
+   tl_assert(clo_filename);
+   tl_assert(clo_filename[0]);
    tl_assert(clo_pagesize > 0);
    tl_assert(clo_every > 0);
    return True;
@@ -1161,7 +1161,7 @@ Int map_context2sampleinfo_compare (const void *p1, const void *p2)
 }
 
 static
-void print_pagestats(VgHashTable *ht, VgFile *fp)
+void print_page_list(VgHashTable *ht, VgFile *fp)
 {
    int nentry = VG_(HT_count_nodes) (ht);
    VG_(fprintf) (fp, "%'d entries:\n", nentry);
@@ -1214,6 +1214,24 @@ void print_sample_info(VgHashTable *ht, VgFile *fp)
       VG_(fprintf) (fp, "[%4d] refs=%u, loc=%s\n", pi->info.id, pi->info.cnt, pi->info.callstack);
    }
    VG_(free) (res);
+}
+
+static
+void print_access_stats(VgHashTable *ht, VgFile *fp)
+{
+   const long unsigned int num = (long unsigned int) VG_(HT_count_nodes) (ht);
+   VG_(HT_ResetIter)(ht);
+   VgHashNode *nd;
+   unsigned long long access = 0;
+   while ((nd = VG_(HT_Next)(ht))) {
+      struct map_pageaddr *pg = (struct map_pageaddr *) nd;
+      access += pg->count;
+   }
+
+   UInt kB = (UInt)((num * clo_pagesize) / 1024.f);
+   Float acc =  ((Float) access) / num;
+   VG_(fprintf) (fp, "pages/access:  %'lu pages (%'u kB)/%'u accesses per page",
+                 num, kB, (UInt) acc);
 }
 
 static
@@ -1278,20 +1296,21 @@ void print_ws_over_time(XArray *xa, VgHashTable *ht_sampleinfo, VgFile *fp)
       VG_(fprintf) (fp, "\n");
    }
 
-   const long unsigned int total_i = (long unsigned int) VG_(HT_count_nodes) (ht_insn);
-   const long unsigned int total_d = (long unsigned int) VG_(HT_count_nodes) (ht_data);
    const Float avg_i = ((Float)sum_i) / (num_t - 1);
    const Float avg_d = ((Float)sum_d) / (num_t - 1);
-   VG_(fprintf) (fp, "\nInsn avg/peak/total:  %'.1f/%'lu/%'lu pages (%'u/%'u/%'u kB)",
-                 avg_i, peak_i, total_i,
+   VG_(fprintf) (fp, "\nInsn WSS avg/peak:  %'.1f/%'lu pages (%'u/%'u kB)",
+                 avg_i, peak_i,
                  (unsigned int)((avg_i * clo_pagesize) / 1024.f),
-                 (unsigned int)((peak_i * clo_pagesize) / 1024.f),
-                 (unsigned int)((total_i * clo_pagesize) / 1024.f));
-   VG_(fprintf) (fp, "\nData avg/peak/total:  %'.1f/%'lu/%'lu pages (%'u/%'u/%'u kB)",
-                 avg_d, peak_d, total_d,
+                 (unsigned int)((peak_i * clo_pagesize) / 1024.f));
+   VG_(fprintf) (fp, "\nData WSS avg/peak:  %'.1f/%'lu pages (%'u/%'u kB)",
+                 avg_d, peak_d,
                  (unsigned int)((avg_d * clo_pagesize) / 1024.f),
-                 (unsigned int)((peak_d * clo_pagesize) / 1024.f),
-                 (unsigned int)((total_d * clo_pagesize) / 1024.f));
+                 (unsigned int)((peak_d * clo_pagesize) / 1024.f));
+
+   VG_(fprintf) (fp, "\nInsn ");
+   print_access_stats (ht_insn, fp);
+   VG_(fprintf) (fp, "\nData ");
+   print_access_stats (ht_data, fp);
 }
 
 /**
@@ -1340,9 +1359,6 @@ void ws_fini(Int exitcode)
    postmortem = True;
    compute_ws(get_time());
 
-   tl_assert(clo_fnname);
-   tl_assert(clo_fnname[0]);
-
    VG_(umsg)("Number of instructions: %'lu\n", (unsigned long) guest_instrs_executed);
    VG_(umsg)("Number of samples:      %'lu\n", VG_(sizeXA) (ws_at_time));
    VG_(umsg)("Dropped samples:        %'lu\n", drop_samples);
@@ -1352,8 +1368,7 @@ void ws_fini(Int exitcode)
    VgFile *fp = VG_(fopen)(outfile, VKI_O_CREAT|VKI_O_TRUNC|VKI_O_WRONLY,
                                     VKI_S_IRUSR|VKI_S_IWUSR);
    if (fp == NULL) {
-      // If the file can't be opened for whatever reason (conflict
-      // between multiple cachegrinded processes?), give up now.
+      // If the file can't be opened for whatever reason, give up now.
       VG_(umsg)("error: can't open simulation output file '%s'\n",
                 outfile );
       VG_(umsg)("       ... so simulation results will be missing.\n");
@@ -1364,7 +1379,7 @@ void ws_fini(Int exitcode)
    }
 
    if (fp != NULL) {
-       // preamble
+      // show preamble
       VG_(fprintf) (fp, "Working Set Measurement by valgrind-%s-%s\n\n", WS_NAME, WS_VERSION);
       VG_(fprintf) (fp, "Command:        %s", VG_(args_the_exename));
       for (int i = 0; i < VG_(sizeXA)( VG_(args_for_client) ); i++) {
@@ -1383,12 +1398,12 @@ void ws_fini(Int exitcode)
       }
       VG_(fprintf) (fp, "--\n\n");
 
-      // page listing
+      // show page listing
       if (clo_listpages) {
          VG_(fprintf) (fp, "Code pages, ");
-         print_pagestats (ht_insn, fp);
+         print_page_list (ht_insn, fp);
          VG_(fprintf) (fp, "\nData pages, ");
-         print_pagestats (ht_data, fp);
+         print_page_list (ht_data, fp);
          VG_(fprintf) (fp, "\n--\n\n");
       }
 
@@ -1396,7 +1411,7 @@ void ws_fini(Int exitcode)
       const unsigned long ninfo = compute_sample_info(ws_context_list);
       VG_(umsg)("Number of info/unique: %lu/%lu\n", VG_(sizeXA)(ws_context_list), ninfo);
 
-      // working set data
+      // show working set data
       VG_(fprintf) (fp, "Working sets:\n");
       print_ws_over_time (ws_at_time, ht_ec2sampleinfo, fp);
       VG_(fprintf) (fp, "\n--\n\n");

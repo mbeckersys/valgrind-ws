@@ -82,7 +82,7 @@ stress-ng: info:  [5931] successful run completed in 15.33s
 The working set data is written to a file, one per PID. The file name can be chosen using `--ws-file`.
 First it prints the header:
 ```
-Working Set Measurement by valgrind-ws-0.1
+Working Set Measurement by valgrind-ws-0.3
 
 Command:        stress-ng -c 1 --cpu-ops=10
 Instructions:   604,599,465
@@ -150,8 +150,10 @@ Working sets:
            .        .        .
            .        .        .
 
-Insn avg/peak/total:  1.4/105/224 pages (5/420/896 kB)
-Data avg/peak/total:  18.9/224/792 pages (75/896/3,168 kB)
+Insn WSS avg/peak:  1.4/105 pages (5/420 kB)
+Data WSS avg/peak:  18.9/224 pages (75/896 kB)
+Insn pages/access:  224 pages (896 kB)/2,699,104 accesses per page
+Data pages/access:  792 pages (3,168 kB)/159,631 accesses per page
 ```
 whereas the increments in column `t` are approximately the value of command line parameter `--every`.
 The avg/peak/total values are interpreted as follows:
@@ -185,9 +187,6 @@ Working sets:
            .        .        .    .
            .        .        .    .
    380931690       27       86    3
-
-Insn avg/peak/total:  1.1/104/182 pages (4/416/728 kB)
-Data avg/peak/total:  19.2/260/743 pages (76/1,040/2,972 kB)
 --
 ```
 
