@@ -176,6 +176,14 @@ typedef
    }
    callstack_string;
 
+typedef
+   struct {
+      unsigned long n;
+      unsigned long sum;
+      Addr          pre;
+   }
+   LocalityInfo;
+
 /*------------------------------------------------------------*/
 /*--- prototypes                                           ---*/
 /*------------------------------------------------------------*/
@@ -204,6 +212,9 @@ static unsigned long  drop_samples = 0;
 
 // list of sample contexts; on termination converted to SampleInfo
 static XArray *ws_context_list;
+
+// locality info
+LocalityInfo locality_insn, locality_data;
 
 /* Up to this many unnotified events are allowed.  Must be at least two,
    so that reads and writes to the same address can be merged into a modify.
@@ -261,6 +272,7 @@ PeakDetect   pd_data, pd_insn;
 static Bool  clo_locations  = True;
 static Bool  clo_listpages  = False;
 static Bool  clo_peakdetect = False;
+static Bool  clo_localitytr = False;
 static Int   clo_peakthresh = WS_DEFAULT_PEAKT;  // FIXME: Float?
 static Int   clo_peakwindow = WS_DEFAULT_PEAKW;
 static Float clo_peakadapt  = WS_DEFAULT_PEAKADP;  // FIXME: from clo
@@ -308,6 +320,7 @@ Bool ws_process_cmd_line_option(const HChar* arg)
    else if VG_XACT_CLO(arg, "--ws-time-unit=i", clo_time_unit, TimeI)  {}
    else if VG_XACT_CLO(arg, "--ws-time-unit=ms", clo_time_unit, TimeMS) {}
    else if VG_BOOL_CLO(arg, "--ws-peak-detect", clo_peakdetect) {}
+   else if VG_BOOL_CLO(arg, "--ws-track-locality", clo_localitytr) {}
    else if VG_INT_CLO(arg, "--ws-peak-window", clo_peakwindow) { tl_assert(clo_peakwindow > 0); }
    else if VG_INT_CLO(arg, "--ws-peak-thresh", clo_peakthresh) { tl_assert(clo_peakthresh > 0); }
    else return False;
@@ -330,6 +343,7 @@ void ws_print_usage(void)
 "    --ws-peak-window=<int>        window length (in samples) for peak detection [%d]\n"
 "    --ws-peak-thresh=<int>        threshold for peaks. Lower is more sensitive [%d]\n"
 "    --ws-info-at=<int>(,<int>)*   list of points in time where additional information shall be recorded\n"
+"    --ws-track-locality=no|yes    compute locality of access\n"
 "    --ws-pagesize=<int>           size of VM pages in bytes [%d]\n"
 "    --ws-time-unit=i|ms           time unit: instructions executed (default), milliseconds\n"
 "    --ws-every=<int>              sample working set every <int> time units [%d]\n"
@@ -358,6 +372,14 @@ const HChar* TimeUnit_to_string(TimeUnit time_unit)
    case TimeMS: return "ms";
    default:     tl_assert2(0, "TimeUnit_to_string: unrecognised TimeUnit");
    }
+}
+
+static
+void init_locality(LocalityInfo *li)
+{
+   li->sum = 0;
+   li->n = 0;
+   li->pre = 0;
 }
 
 static
@@ -474,6 +496,17 @@ inline Addr pageaddr(Addr addr)
    return addr & ~(clo_pagesize-1);
 }
 
+static
+inline void track_locality(LocalityInfo *li, Addr addr)
+{
+   if (li->pre != addr) {
+      const unsigned long d = li->pre > addr? li->pre - addr : addr - li->pre;
+      li->sum += d;
+      li->pre = addr;
+   }
+   li->n++;  ///< technically, we could derive this from #page accesses. But it's ~no overhead.
+}
+
 // TODO: pages shared between processes?
 static
 inline void pageaccess(Addr pageaddr, VgHashTable *ht)
@@ -507,6 +540,7 @@ VG_REGPARM(2) void trace_data(Addr addr, SizeT size)
 {
    const Addr pa = pageaddr(addr);
    pageaccess(pa, ht_data);
+   if (clo_localitytr) track_locality(&locality_data, addr);
 }
 
 static
@@ -514,6 +548,7 @@ VG_REGPARM(2) void trace_instr(Addr addr, SizeT size)
 {
    const Addr pa = pageaddr(addr);
    pageaccess(pa, ht_insn);
+   if (clo_localitytr) track_locality(&locality_insn, addr);
 }
 
 static
@@ -728,6 +763,10 @@ void ws_post_clo_init(void)
    // peak filters
    init_peakd(&pd_data);
    init_peakd(&pd_insn);
+
+   // locality trackers
+   init_locality(&locality_data);
+   init_locality(&locality_insn);
 
    // verbose a bit
    VG_(umsg)("Page size = %d bytes\n", clo_pagesize);
@@ -1353,6 +1392,17 @@ void free_sample_info(void *arg)
 }
 
 static
+void print_locality_stats(VgFile *fp)
+{
+   VG_(fprintf) (fp, "Insn refs/avg dist: %'lu/%'lu\n",
+                 locality_insn.n,
+                 (unsigned long) (locality_insn.sum / ((Float)locality_insn.n)));
+   VG_(fprintf) (fp, "Data refs/avg dist: %'lu/%'lu\n",
+                 locality_data.n,
+                 (unsigned long) (locality_data.sum / ((Float)locality_data.n)));
+}
+
+static
 void ws_fini(Int exitcode)
 {
    // force one last data point
@@ -1422,6 +1472,13 @@ void ws_fini(Int exitcode)
          print_sample_info (ht_ec2sampleinfo, fp);
          VG_(fprintf) (fp, "\n");
          VG_(fprintf) (fp, "Number of info/unique: %lu/%lu", VG_(sizeXA)(ws_context_list), ninfo);
+         VG_(fprintf) (fp, "\n--\n\n");
+      }
+
+      // locality info
+      if (clo_localitytr) {
+         VG_(fprintf) (fp, "Locality statistics:\n");
+         print_locality_stats (fp);
          VG_(fprintf) (fp, "\n--\n\n");
       }
    }
