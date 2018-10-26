@@ -160,6 +160,7 @@ The avg/var/total values are interpreted as follows:
  * `avg` is the average number of the working set size over all samples in `t`.
  * `total` is the working set size over the entire life time of the process, i.e., t=tau=inf.
  * `var` is the variance of the working set size over all `t`.
+
 Finally, the tool shows the total number of pages that have been accessed, and how often they
 have been accessed in average.
 

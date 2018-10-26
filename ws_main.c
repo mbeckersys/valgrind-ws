@@ -215,6 +215,8 @@ static XArray *ws_context_list;
 
 // locality info
 LocalityInfo locality_insn, locality_data;
+static ULong n_SBs_entered = 0;
+static ULong n_SBs_exited  = 0;
 
 /* Up to this many unnotified events are allowed.  Must be at least two,
    so that reads and writes to the same address can be merged into a modify.
@@ -777,14 +779,30 @@ void ws_post_clo_init(void)
 }
 
 static
+void add_one_SB_entered(void)
+{
+   n_SBs_entered++;
+}
+
+static
+void add_one_SB_exited(void)
+{
+   n_SBs_exited++;
+}
+
+/**
+ * @brief instruments SB with a counter that increments by n, and is saved
+ * into guest_instrs_executed.
+ */
+static
 void add_counter_update(IRSB* sbOut, Int n)
 {
    #if defined(VG_BIGENDIAN)
-   # define END Iend_BE
+      #define END Iend_BE
    #elif defined(VG_LITTLEENDIAN)
-   # define END Iend_LE
+      #define END Iend_LE
    #else
-   # error "Unknown endianness"
+      #error "Unknown endianness"
    #endif
    // Add code to increment 'guest_instrs_executed' by 'n', like this:
    //   WrTmp(t1, Load64(&guest_instrs_executed))
@@ -987,10 +1005,6 @@ void maybe_compute_ws (void)
    earliest_possible_time_of_next_ws = now_time + clo_every;
 }
 
-// We increment the instruction count in two places:
-// - just before any Ist_Exit statements;
-// - just before the IRSB's end.
-// In the former case, we zero 'n' and then continue instrumenting.
 static
 IRSB* ws_instrument ( VgCallbackClosure* closure,
                       IRSB* sbIn,
@@ -1009,6 +1023,13 @@ IRSB* ws_instrument ( VgCallbackClosure* closure,
    }
 
    sbOut = deepCopyIRSBExceptStmts(sbIn);
+
+   if (clo_localitytr) {
+      IRDirty* di = unsafeIRDirty_0_N( 0, "add_one_SB_entered",
+                        VG_(fnptr_to_fnentry)( &add_one_SB_entered ),
+                        mkIRExprVec_0() );
+      addStmtToIRSB( sbOut, IRStmt_Dirty(di) );
+   }
 
    // Copy verbatim any IR preamble preceding the first IMark
    i = 0;
@@ -1151,6 +1172,12 @@ IRSB* ws_instrument ( VgCallbackClosure* closure,
                // Add an increment before the Exit statement, then reset 'n'.
                add_counter_update(sbOut, ninsn);
                ninsn = 0;
+            }
+            if (clo_localitytr) {
+               IRDirty* di = unsafeIRDirty_0_N( 0, "add_one_SB_exit",
+                                 VG_(fnptr_to_fnentry)( &add_one_SB_exited ),
+                                 mkIRExprVec_0() );
+               addStmtToIRSB( sbOut, IRStmt_Dirty(di) );
             }
             flushEvents(sbOut);
             addStmtToIRSB( sbOut, st );      // Original statement
@@ -1408,6 +1435,9 @@ void print_locality_stats(VgFile *fp)
    VG_(fprintf) (fp, "Data refs/avg dist: %'lu/%'lu\n",
                  locality_data.n,
                  (unsigned long) (locality_data.sum / ((Float)locality_data.n)));
+   VG_(fprintf) (fp, "SB len enter/exits: %.1f/%.1f\n",
+                 guest_instrs_executed / ((Float) n_SBs_entered),
+                 guest_instrs_executed / ((Float) n_SBs_exited));
 }
 
 static
