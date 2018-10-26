@@ -1269,7 +1269,7 @@ void print_access_stats(VgHashTable *ht, VgFile *fp)
 
    UInt kB = (UInt)((num * clo_pagesize) / 1024.f);
    Float acc =  ((Float) access) / num;
-   VG_(fprintf) (fp, "pages/access:  %'lu pages (%'u kB)/%'u accesses per page",
+   VG_(fprintf) (fp, "pages/access:      %'lu pages (%'u kB)/%'u accesses per page",
                  num, kB, (UInt) acc);
 }
 
@@ -1296,16 +1296,22 @@ void print_ws_over_time(XArray *xa, VgHashTable *ht_sampleinfo, VgFile *fp)
    // data points
    const int num_t = VG_(sizeXA)(xa);
    unsigned long peak_i = 0, peak_d = 0;
-   unsigned long long sum_i = 0, sum_d = 0;
+   //unsigned long long sum_i = 0, sum_d = 0;
+
+   Float avg_d = 0.f, avg_i = 0.f, Sd = 0.f, Si = 0.f, avg_pre = 0.f;
    for (int i = 0; i < num_t; i++) {
       WorkingSet **ws = VG_(indexXA)(xa, i);
       const unsigned long t = (unsigned long)(*ws)->t;
       const unsigned long pi = (*ws)->pages_insn;
       const unsigned long pd = (*ws)->pages_data;
 
-      // track stats
-      sum_i += pi;
-      sum_d += pd;
+      // track stats (Welford's algorithm)
+      avg_pre = avg_d;
+      avg_d = avg_pre + (pd - avg_pre) / ((Float)(i + 1));
+      Sd = Sd + (pd - avg_pre) * (pd - avg_d);
+      avg_pre = avg_i;
+      avg_i = avg_pre + (pi - avg_pre) / ((Float)(i + 1));
+      Si = Si + (pi - avg_pre) * (pi - avg_i);
       if (pi > peak_i) peak_i = pi;
       if (pd > peak_d) peak_d = pd;
 
@@ -1335,15 +1341,17 @@ void print_ws_over_time(XArray *xa, VgHashTable *ht_sampleinfo, VgFile *fp)
       VG_(fprintf) (fp, "\n");
    }
 
-   const Float avg_i = ((Float)sum_i) / (num_t - 1);
-   const Float avg_d = ((Float)sum_d) / (num_t - 1);
-   VG_(fprintf) (fp, "\nInsn WSS avg/peak:  %'.1f/%'lu pages (%'u/%'u kB)",
-                 avg_i, peak_i,
+   const Float var_d = Sd / (num_t - 1);
+   const Float var_i = Si / (num_t - 1);
+   VG_(fprintf) (fp, "\nInsn WSS avg/var/peak:  %'.1f/%'.1f/%'lu pages (%'u/%'u/%'u kB)",
+                 avg_i, var_i, peak_i,
                  (unsigned int)((avg_i * clo_pagesize) / 1024.f),
+                 (unsigned int)((var_i * clo_pagesize) / 1024.f),
                  (unsigned int)((peak_i * clo_pagesize) / 1024.f));
-   VG_(fprintf) (fp, "\nData WSS avg/peak:  %'.1f/%'lu pages (%'u/%'u kB)",
-                 avg_d, peak_d,
+   VG_(fprintf) (fp, "\nData WSS avg/var/peak:  %'.1f/%'.1f/%'lu pages (%'u/%'u/%'u kB)",
+                 avg_d, var_d, peak_d,
                  (unsigned int)((avg_d * clo_pagesize) / 1024.f),
+                 (unsigned int)((var_d * clo_pagesize) / 1024.f),
                  (unsigned int)((peak_d * clo_pagesize) / 1024.f));
 
    VG_(fprintf) (fp, "\nInsn ");

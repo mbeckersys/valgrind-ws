@@ -1,10 +1,13 @@
 #!/usr/bin/python
 from lib import testbase
 
+DESC = "Checking whether it runs..."
+
 
 def check_result(fname):
-    return True  # TODO
+    return True
 
 
-result = testbase.run(__file__, ['stress-ng', '--memfd', '1', '-t' '5'])
+result = testbase.run(DESC, __file__, ['sleep', '2'])
 testbase.analyze(result, check_result)
+

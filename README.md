@@ -150,16 +150,22 @@ Working sets:
            .        .        .
            .        .        .
 
-Insn WSS avg/peak:  1.4/105 pages (5/420 kB)
-Data WSS avg/peak:  18.9/224 pages (75/896 kB)
-Insn pages/access:  224 pages (896 kB)/2,699,104 accesses per page
-Data pages/access:  792 pages (3,168 kB)/159,631 accesses per page
+Insn WSS avg/var/peak:  1.4/11.7/105 pages (5/46/420 kB)
+Data WSS avg/var/peak:  18.9/102.1/224 pages (75/408/896 kB)
+Insn pages/access:      224 pages (896 kB)/2,699,104 accesses per page
+Data pages/access:      792 pages (3,168 kB)/159,631 accesses per page
 ```
 whereas the increments in column `t` are approximately the value of command line parameter `--every`.
-The avg/peak/total values are interpreted as follows:
+The avg/var/total values are interpreted as follows:
  * `avg` is the average number of the working set size over all samples in `t`.
  * `total` is the working set size over the entire life time of the process, i.e., t=tau=inf.
- * `peak` is the maximum working set size over all `t`.
+ * `var` is the variance of the working set size over all `t`.
+Finally, the tool shows the total number of pages that have been accessed, and how often they
+have been accessed in average.
+
+### Stride Analysis (experimental)
+With option `--ws-track-locality`.
+
 
 ### Additional Information for Samples
 Additional information, such as the current call stack, can be collected for some samples. Currently,
@@ -167,7 +173,7 @@ there are two ways to determine for which samples detailed information is record
  1. at user-defined points in time. Use command line argument `--ws-info-at`
  2. automatically, when peaksin the working set size are detected. Use command line argument `--ws-peak-detect=yes`. More information about peak detection is given below
 
-#### Peak Detection (experimental)
+#### Peak Detection
 With option `--ws-peak-detect=yes`, the tool tries to detect sudden jumps in the working set sizes,
 and records additional sample information to allow for further debugging.
 Towards this, the working set table is augmented with a column `info`, which contains an ID number

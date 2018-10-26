@@ -7,7 +7,8 @@ def outfile(testname):
     return os.path.splitext(os.path.basename(testname))[0] + '.%p.log'
 
 
-def run(caller, args):
+def run(desc, caller, args):
+    print desc,
     blob = subprocess.check_output(['valgrind', '--tool=ws', '--ws-file={}'.format
                                    (outfile(caller))] + args, stderr=subprocess.STDOUT)
     return blob.split("\n")
