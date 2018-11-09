@@ -520,7 +520,7 @@ inline void pageaccess(Addr pageaddr, VgHashTable *ht)
    if (pageaddr == lastaddr) {
       page = lastpage;
    } else {
-      page = VG_(HT_lookup) (ht, pageaddr);
+      page = VG_(HT_lookup) (ht, pageaddr);  // FIXME: might be a bottleneck
       if (page == NULL) {
          page = VG_(malloc) (sizeof (*page));
          page->top.key = pageaddr;

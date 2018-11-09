@@ -86,7 +86,7 @@ def plot_all(stats, info, args):
         plt.show()
 
 
-def parse_file(fname):
+def parse_file(fname, with_info):
 
     def human_number_to_int(st):
         try:
@@ -146,14 +146,16 @@ def parse_file(fname):
                         t = int(parts[wset_header.index('t')])
                         wssi = int(parts[wset_header.index('WSS_insn')])
                         wssd = int(parts[wset_header.index('WSS_data')])
-                        try:
-                            sinf = int(parts[wset_header.index('info')])
-                        except (IndexError, ValueError):
-                            sinf = None
+                        sinf = None
+                        if with_info:
+                            try:
+                                sinf = int(parts[wset_header.index('info')])
+                            except (IndexError, ValueError):
+                                pass
                         ret.append(dict(t=t, wssi=wssi, wssd=wssd, info=sinf))
                         log.debug("wset point: t={}, i={}, d={}, pk={}".format(t, wssi, wssd, sinf))
 
-            if state == "sampleinfo":
+            if state == "sampleinfo" and with_info:
                 m = re.match(r"\[\s+(\d+)\] refs=(\d+), loc=(.*)$", line)
                 if m:
                     if 'sampleinfo' not in info: info['sampleinfo'] = {}
@@ -170,7 +172,7 @@ def parse_file(fname):
 
 def process(args):
     """parse the file and plot"""
-    stats, info = parse_file(args.file)
+    stats, info = parse_file(args.file, not args.no_info)
     if stats:
         log.info("Successfully parsed files: {}".format(args.file))
     else:
@@ -191,6 +193,8 @@ def main(argv):
     parser.add_argument('-y', '--yscale', default='linear',
                         choices=['linear', 'symlog', 'log'],
                         help='choose scaling for y axis')
+    parser.add_argument('-n', '--no-info', action='store_true', default=False,
+                        help='suppress sample information in plot')
     parser.add_argument('-o', '--outfile', default=None,
                         help='filename to save plot')
     parser.add_argument('-s', '--figsize', default=None,
